@@ -1,0 +1,36 @@
+# Local infrastructure for the gateway: PostgreSQL and the Mosquitto MQTT broker.
+# The Python processes (detection service, web app, simulator) run on the host.
+#
+# Dev credentials only. Change them before this runs anywhere but a laptop.
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: wildfire
+    ports:
+      - "5432:5432"
+    volumes:
+      # Named volume, not a bind mount: keeps database files out of OneDrive.
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, on first start with an empty volume. Creates the read-only web role.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d wildfire"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+volumes:
+  pgdata:

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Node - Wildfire gateway</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Wildfire gateway</h1>
+    <nav><a href="/">Operator console</a><a href="/alarms">Alarm history</a></nav>
+    <span class="updated" id="updated"></span>
+  </header>
+  <div id="banners"></div>
+  <main>
+    <div class="node-head">
+      <h2 id="title">Node</h2>
+      <span id="state"></span>
+      <span class="meta" id="meta"></span>
+      <div class="controls" id="range">
+        <button data-h="0.25">15 min</button><button data-h="1">1 h</button><button data-h="6">6 h</button>
+        <button data-h="24">24 h</button><button data-h="168">7 days</button>
+      </div>
+    </div>
+    <div class="charts">
+      <div class="chart-card">
+        <h3>Gas resistance (k&Omega;)</h3>
+        <div class="legend"><i style="border-color:var(--c-reading)"></i>reading
+          <i class="dash" style="border-color:var(--c-baseline)"></i>baseline
+          <i class="band" style="background:var(--band-watch)"></i>WATCH
+          <i class="band" style="background:var(--band-alarm)"></i>ALARM
+          &nbsp;Smoke makes this <b>drop</b>.</div>
+        <div class="chart" id="c-gas"></div>
+      </div>
+      <div class="chart-card">
+        <h3>Temperature (&deg;C)</h3>
+        <div class="legend"><i style="border-color:var(--c-reading)"></i>reading
+          <i class="dash" style="border-color:var(--c-baseline)"></i>baseline</div>
+        <div class="chart" id="c-temp"></div>
+      </div>
+      <div class="chart-card">
+        <h3>Relative humidity (%)</h3>
+        <div class="legend"><i style="border-color:var(--c-reading)"></i>reading
+          <i class="dash" style="border-color:var(--c-baseline)"></i>baseline</div>
+        <div class="chart" id="c-hum"></div>
+      </div>
+      <div class="chart-card">
+        <h3>Pressure (hPa)</h3>
+        <div class="legend"><i style="border-color:var(--c-reading)"></i>reading</div>
+        <div class="chart" id="c-pres"></div>
+      </div>
+    </div>
+    <p class="thresholds" id="thresholds"></p>
+
+    <h2>Events for this node</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Event</th><th>Message</th></tr></thead>
+        <tbody id="events"></tbody>
+      </table>
+    </div>
+  </main>
+  <script src="/static/common.js"></script>
+  <script src="/static/charts.js"></script>
+  <script>
+    "use strict";
+    const devEui = decodeURIComponent(location.pathname.split("/").pop());
+    let hours = null, last = null;
+
+    function draw(data) {
+      const pts = data.points;
+      const times = pts.map(p => new Date(p.t));
+      const bands = stateBands(times, pts.map(p => p.state));
+      const common = { times, bands, xMin: new Date(data.from), xMax: new Date(data.to) };
+      const col = (k, scale = 1) => pts.map(p => p[k] === null ? null : p[k] / scale);
+      const reading = "var(--c-reading)", base = "var(--c-baseline)";
+      lineChart(document.getElementById("c-gas"), { ...common, unit: "kOhm", digits: 1, series: [
+        { label: "Gas", values: col("gas_ohm", 1000), color: reading },
+        { label: "Baseline", values: col("baseline_gas_ohm", 1000), color: base, dashed: true }] });
+      lineChart(document.getElementById("c-temp"), { ...common, unit: "C", digits: 2, series: [
+        { label: "Temperature", values: col("temperature_c"), color: reading },
+        { label: "Baseline", values: col("baseline_temperature_c"), color: base, dashed: true }] });
+      lineChart(document.getElementById("c-hum"), { ...common, unit: "%", digits: 1, series: [
+        { label: "Humidity", values: col("humidity_pct"), color: reading },
+        { label: "Baseline", values: col("baseline_humidity_pct"), color: base, dashed: true }] });
+      lineChart(document.getElementById("c-pres"), { ...common, unit: "hPa", digits: 1, series: [
+        { label: "Pressure", values: col("pressure_hpa"), color: reading }] });
+    }
+
+    async function refresh() {
+      const cfg = await getConfig();
+      hours = hours || cfg.chart_hours;
+      document.querySelectorAll("#range button").forEach(b =>
+        b.classList.toggle("active", +b.dataset.h === hours));
+
+      const [status, data, evs] = await Promise.all([
+        getJSON("/api/status"),
+        getJSON(`/api/nodes/${encodeURIComponent(devEui)}/readings?hours=${hours}`),
+        getJSON(`/api/events?kind=all&limit=50&dev_eui=${encodeURIComponent(devEui)}`),
+      ]);
+      const n = data.node;
+      const label = labelOf(n.dev_eui, n.name);
+      document.title = `${label} - Wildfire gateway`;
+      renderBanners(status);  // after the title: it may prefix [FIRE ALARM]
+      document.getElementById("title").textContent = label;
+      document.getElementById("state").innerHTML = badge(n.state) + (n.online ? "" : " " + badge("OFFLINE"));
+      // The node detail page is where the hardware identity is shown.
+      document.getElementById("meta").textContent =
+        `devEUI ${n.dev_eui} · device ${n.name} · last seen ${fmtAgo(n.last_seen)} · RSSI ${fmt(n.rssi, 0)} dBm · SNR ${fmt(n.snr, 1)} dB · battery ${fmt(n.battery_v, 2)} V` +
+        (data.total_points > data.points.length ? ` · showing ${data.points.length} of ${data.total_points} readings` : "");
+      last = data;
+      draw(data);
+
+      document.getElementById("thresholds").textContent =
+        `WATCH when gas is ${cfg.watch.gas_drop_pct}% below baseline AND (temperature +${cfg.watch.temperature_rise_c} C or humidity -${cfg.watch.humidity_drop_pct} pts). ` +
+        `ALARM at ${cfg.alarm.gas_drop_pct}% AND (+${cfg.alarm.temperature_rise_c} C or -${cfg.alarm.humidity_drop_pct} pts).`;
+
+      document.getElementById("events").innerHTML = evs.events.length ? evs.events.map(e => `
+        <tr><td>${esc(fmtTime(e.time))}</td><td>${badge(e.to_state || e.kind)}</td>
+        <td class="msg">${esc(e.message)}</td></tr>`).join("")
+        : `<tr><td colspan="3" class="empty">No events yet</td></tr>`;
+    }
+
+    document.getElementById("range").addEventListener("click", ev => {
+      const b = ev.target.closest("button");
+      if (!b) return;
+      hours = +b.dataset.h;
+      refresh().catch(showError);
+    });
+    let resizeTimer;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => last && draw(last), 150);
+    });
+    startPolling(refresh);
+  </script>
+</body>
+</html>

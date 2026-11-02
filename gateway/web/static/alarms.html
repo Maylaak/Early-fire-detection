@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alarm history - Wildfire gateway</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Wildfire gateway</h1>
+    <nav><a href="/">Operator console</a><a href="/alarms" class="active">Alarm history</a></nav>
+    <span class="updated" id="updated"></span>
+  </header>
+  <div id="banners"></div>
+  <main>
+    <div class="node-head">
+      <h2>Alarm history</h2>
+      <div class="controls">
+        <select id="kind">
+          <option value="alarms">Alarms and watches</option>
+          <option value="connectivity">Offline / online</option>
+          <option value="all">Everything</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-wrap" style="margin-top:12px">
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Node</th><th>Change</th><th>Message</th><th>Notified</th></tr>
+        </thead>
+        <tbody id="events"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+  <script src="/static/common.js"></script>
+  <script>
+    "use strict";
+    const kindEl = document.getElementById("kind");
+
+    function row(e) {
+      const change = e.from_state ? `${badge(e.from_state)} &rarr; ${badge(e.to_state)}` : badge(e.kind);
+      const cls = e.to_state === "ALARM" ? "row-alarm" : e.to_state === "WATCH" ? "row-watch" : "";
+      return `<tr class="${cls}">
+        <td>${esc(fmtTime(e.time))}</td>
+        <td><a href="/node/${esc(e.dev_eui)}">${esc(labelOf(e.dev_eui, e.node))}</a></td>
+        <td>${change}</td>
+        <td class="msg">${esc(e.message)}</td>
+        <td>${e.notified ? "yes" : "-"}</td>
+      </tr>`;
+    }
+
+    async function refresh() {
+      await getConfig();  // site labels
+      const [status, data] = await Promise.all([
+        getJSON("/api/status"),
+        getJSON(`/api/events?kind=${kindEl.value}&limit=500`),
+      ]);
+      renderBanners(status);
+      document.getElementById("events").innerHTML = data.events.length
+        ? data.events.map(row).join("")
+        : `<tr><td colspan="5" class="empty">Nothing recorded yet</td></tr>`;
+    }
+
+    kindEl.addEventListener("change", () => refresh().catch(showError));
+    startPolling(refresh);
+  </script>
+</body>
+</html>

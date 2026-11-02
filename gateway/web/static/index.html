@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operator console - Wildfire gateway</title>
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/static/vendor/markercluster/MarkerCluster.css">
+  <link rel="stylesheet" href="/static/console.css">
+</head>
+<body class="console">
+  <header class="topbar">
+    <div class="brand">
+      <h1 id="title">CIVIL DEFENCE CENTRE</h1>
+      <p id="subtitle">Forest fire early-warning - operator console</p>
+    </div>
+    <div class="pill NO_DATA" id="pill" role="status" aria-live="assertive">
+      <span id="pill-text">NO DATA</span><small id="pill-note"></small>
+    </div>
+    <div class="topright">
+      <time id="clock"></time>
+      <nav><a href="/alarms">Alarm history</a></nav>
+    </div>
+  </header>
+  <div class="conn" id="conn" hidden></div>
+  <div class="warn-bar" id="timing-warn" role="alert" hidden></div>
+
+  <main class="grid">
+    <section class="col-left">
+      <div class="panel map-panel">
+        <div class="panel-head">
+          <h2>FOREST MAP</h2>
+          <span class="muted" id="map-note"></span>
+          <button type="button" class="sound" id="sound" aria-pressed="false">Sound: OFF</button>
+        </div>
+        <!-- What the map is showing, and any alerting node it cannot place.
+             Above the map, not on it, so it never covers a marker. -->
+        <div class="map-info" id="map-info" aria-live="polite"></div>
+        <div id="map" aria-label="Map of sensor blocks and nodes, gateways and alarm zones"></div>
+      </div>
+      <div class="pair">
+        <div class="panel phase2" id="p-drone" data-feature="drone">
+          <div class="panel-head"><h2>DRONE - UAV-01</h2></div>
+          <div class="phase2-body"></div>
+        </div>
+        <div class="panel phase2" id="p-wind" data-feature="wind_station">
+          <div class="panel-head"><h2>CONDITIONS - WIND STATION</h2></div>
+          <div class="phase2-body"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="col-right">
+      <div class="panel" id="network">
+        <div class="panel-head">
+          <h2>SENSOR NETWORK</h2>
+          <span class="muted">event-driven - transmits on alarm</span>
+        </div>
+        <div class="stats">
+          <div class="stat"><b id="st-total">-</b><span>total nodes</span></div>
+          <div class="stat" id="st-alarm-box"><b id="st-alarm">-</b><span>nodes in alarm</span></div>
+          <div class="stat"><b id="st-gw">-</b><span>gateways online</span></div>
+        </div>
+        <div id="blocks"></div>
+        <div class="node-list">
+          <table class="nodes">
+            <thead><tr><th>Node</th><th>State</th><th>Last seen</th><th class="num">T &deg;C</th><th class="num">RH %</th><th class="num">Gas vs base</th></tr></thead>
+            <tbody id="nodes"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody>
+          </table>
+        </div>
+        <p class="muted small" id="net-foot"></p>
+      </div>
+
+      <div class="panel phase2" id="p-thermal" data-feature="thermal_camera">
+        <div class="panel-head"><h2>THERMAL CAMERA</h2></div>
+        <div class="phase2-body"></div>
+      </div>
+
+      <div class="panel log-panel">
+        <div class="panel-head"><h2>EVENT LOG</h2><span class="muted">newest at the bottom</span></div>
+        <ol class="log" id="log" aria-live="polite"></ol>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/vendor/leaflet/leaflet.js"></script>
+  <script src="/static/vendor/markercluster/leaflet.markercluster.js"></script>
+  <script src="/static/common.js"></script>
+  <script src="/static/console.js"></script>
+</body>
+</html>

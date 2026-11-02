@@ -1,0 +1,311 @@
+# Wildfire detection gateway configuration.
+# Every threshold and tunable lives here. Unknown keys are rejected at startup,
+# so a typo fails loudly instead of being silently ignored.
+#
+# Environment variables override a few settings (handy for the SQLite
+# fallback, a non-local broker, or a demo):
+#   DATABASE_URL, WEB_DATABASE_URL, MQTT_HOST, MQTT_PORT, DEMO_SPEEDUP
+#
+# See the effective values (after derivation and demo speed-up) with:
+#   python -m gateway.config
+
+mqtt:
+  host: localhost
+  port: 1883
+  # ChirpStack v4 uplink topic: application/{application_id}/device/{dev_eui}/event/up
+  uplink_topic: "application/+/device/+/event/up"
+  qos: 1
+  keepalive_seconds: 60
+
+database:
+  # Detection service: read/write.
+  url: "postgresql+psycopg://gateway:gateway@localhost:5432/wildfire"
+  # Web app: read-only role (created by db/init/01-readonly-role.sql).
+  web_url: "postgresql+psycopg://webapp_ro:webapp_ro@localhost:5432/wildfire"
+  # SQLite fallback (no Docker): set both to "sqlite:///data/wildfire.db"
+
+timing:
+  # Nodes report on a slow heartbeat (LoRaWAN duty cycle, battery), and ALSO
+  # transmit straight away when their own readings breach a local threshold.
+  heartbeat_minutes: 10
+  # A node is MISSING after this many heartbeats with no uplink. The detection
+  # service's offline alert uses the same value: 10 min x 3 = 30 min.
+  missed_heartbeats_for_missing: 3
+  # Demo speed-up. 1 = real time (the deployment default). 60 = a 10-minute
+  # heartbeat every 10 s, a 30-minute missing threshold of 30 s, and so on.
+  # Divides every wall-clock duration (heartbeat, half-lives, cooldown, smoke
+  # ramp...). Does NOT change sample counts: warm-up is still 30 readings.
+  # Override without editing this file:  set DEMO_SPEEDUP=60
+  demo_speedup: 1
+  # The detection service writes a "system check" line to the operator
+  # console's event log this often (nodes reporting, gateways, alarms).
+  system_check_minutes: 60
+
+# LoRaWAN application ports (fPort) the node firmware sends on.
+# PLACEHOLDER until the real firmware exists, and a REQUIREMENT on it: the
+# gateway tells a normal heartbeat from an alarm-mode uplink (the node's own
+# sensor saw a change and it now reports about every minute) by this port,
+# never by guessing from timing. Same 11-byte payload on both ports.
+lorawan:
+  heartbeat_f_port: 2
+  alarm_mode_f_port: 3
+
+simulator:
+  # ChirpStack v4 application IDs are UUIDs.
+  application_id: "3f6c1a52-8b0e-4d1c-9a57-2e4b8c7d9f10"
+  application_name: "wildfire-detection"
+  gateway_id: "0016c001ff100001"
+  # The running simulator listens here for smoke-injection commands.
+  control_topic: "sim/control/inject"
+  # null = different random noise every run; an integer = repeatable run.
+  seed: null
+
+  noise:                      # 1-sigma, per reading
+    temperature_c: 0.05
+    humidity_pct: 0.3
+    pressure_hpa: 0.05
+    gas_fraction: 0.02        # multiplicative: 0.02 = 2 %
+    rssi_db: 2.0
+    snr_db: 0.8
+    # Chance per reading of a one-off bad gas value (resistance x0.3-0.7).
+    glitch_probability: 0.002
+
+  drift:                      # slow random walk, 1-sigma per hour
+    temperature_c: 0.1
+    humidity_pct: 0.4
+    pressure_hpa: 0.3
+    gas_fraction: 0.01
+
+  diurnal:                    # day/night cycle
+    peak_hour_utc: 12         # ~15:00 Lebanon time
+    temperature_amplitude_c: 5.0
+    humidity_amplitude_pct: 12.0
+    # BME688 gas resistance falls when humidity rises. Fraction per %RH.
+    gas_humidity_coeff: 0.006
+
+  weather:                    # random rain/fog: humidity up, temp down, gas down
+    rain_events_per_day: 0.3
+    rain_ramp_hours: 1.0
+    rain_hold_hours: 3.0
+    rain_humidity_rise_pct: 25.0
+    rain_temperature_drop_c: 4.0
+
+  battery_drain_v_per_day: 0.01
+
+  smoke:                      # profile applied by "python -m gateway.sim inject"
+    ramp_minutes: 5
+    hold_minutes: 20
+    gas_drop_fraction: 0.6    # resistance falls to 40 % of normal (smoke = DROP)
+    temperature_rise_c: 6.0
+    humidity_drop_pct: 15.0
+
+  # PLACEHOLDER node firmware (the real firmware is not written yet). These
+  # decide WHEN a simulated node transmits; the gateway does not read them.
+  # The node reads its sensor every sample_seconds. It transmits:
+  #   - a heartbeat every timing.heartbeat_minutes, and
+  #   - straight away when its local trigger fires, then every
+  #     alarm_interval_minutes until alarm_hold_minutes after it clears,
+  # never faster than the EU868 duty cycle allows at its spreading factor
+  # (1 % for 11 bytes: SF7 ~6 s between uplinks ... SF11 ~82 s, SF12 ~147 s).
+  firmware:
+    sample_seconds: 30
+    local_trigger:
+      # The node's own slow gas baseline. Gas only: the gateway needs a gas
+      # drop for WATCH anyway, and a local temperature trigger would fire on
+      # every warm afternoon.
+      baseline_half_life_minutes: 60
+      warmup_samples: 20
+      gas_drop_pct: 15          # more sensitive than the gateway's WATCH (25)
+      confirm_samples: 2        # a one-off gas glitch does not trigger
+    alarm_interval_minutes: 1
+    alarm_hold_minutes: 10
+    duty_cycle: 0.01            # EU868 868.0-868.6 MHz sub-band
+
+  nodes:
+    - name: node-1
+      dev_eui: "70b3d57ed0000001"
+      dev_addr: "260b0001"
+      temperature_c: 22.0
+      humidity_pct: 55.0
+      pressure_hpa: 1008.0
+      gas_resistance_ohm: 180000
+      battery_v: 3.95
+      rssi_dbm: -92
+      snr_db: 7.5
+    - name: node-2
+      dev_eui: "70b3d57ed0000002"
+      dev_addr: "260b0002"
+      temperature_c: 20.5
+      humidity_pct: 60.0
+      pressure_hpa: 1002.0
+      gas_resistance_ohm: 240000
+      battery_v: 4.05
+      rssi_dbm: -105
+      snr_db: 2.0
+    - name: node-3
+      dev_eui: "70b3d57ed0000003"
+      dev_addr: "260b0003"
+      temperature_c: 24.0
+      humidity_pct: 48.0
+      pressure_hpa: 995.0
+      gas_resistance_ohm: 150000
+      battery_v: 3.80
+      rssi_dbm: -98
+      snr_db: 5.0
+    - name: node-4
+      dev_eui: "70b3d57ed0000004"
+      dev_addr: "260b0004"
+      temperature_c: 18.0
+      humidity_pct: 65.0
+      pressure_hpa: 985.0
+      gas_resistance_ohm: 300000
+      battery_v: 3.70
+      rssi_dbm: -114
+      snr_db: -6.5
+
+detection:
+  # EWMA baseline per node, per channel. Weight comes from the real time gap
+  # between readings, so missed packets and longer intervals are handled.
+  # Gas keeps a slow 2 h baseline. Temperature and humidity use a faster one:
+  # with 2 h they lag the evening cool-down by ~5 C / ~9 %RH, which hides the
+  # smoke's temperature rise and humidity drop (measured: 1 in 3 evening
+  # fires missed). With 20 min the lag is under 1 C.
+  baseline_half_life_minutes:
+    gas: 120
+    temperature: 20
+    humidity: 20
+  # Do not evaluate a node until its baseline has this many samples.
+  warmup_samples: 30
+  # On startup, rebuild baselines from this many hours of stored readings.
+  replay_hours_on_startup: 12
+  # Stop updating the baseline in these states (and for any anomalous reading),
+  # so it does not chase the smoke.
+  freeze_baseline_states: [WATCH, ALARM]
+  # Safety valve: resume baseline updates after this long frozen, so a
+  # permanent sensor shift cannot hold a node in WATCH forever.
+  max_baseline_freeze_minutes: 360
+
+  # Deviations from baseline. A level is met when the gas drop is met AND
+  # (temperature rise OR humidity drop) is met. Never absolute values.
+  watch:
+    gas_drop_pct: 25          # resistance at least 25 % below baseline
+    temperature_rise_c: 3.0
+    humidity_drop_pct: 8.0    # %RH points below baseline
+  alarm:
+    gas_drop_pct: 45
+    # Was 5.0. Smoke starting during a rain front: the temperature baseline
+    # lags the rain's cooling, so +6 C of smoke read as ~+4.7 C. Measured
+    # over 240 injections: misses 9 -> 2; false alarms 0 in 336 node-days
+    # either way. Still needs the 45 % gas drop. Re-check with field data.
+    temperature_rise_c: 4.0
+    humidity_drop_pct: 12.0
+
+  # Hysteresis: consecutive readings needed before a state change.
+  confirm_samples:
+    watch: 3                  # NORMAL -> WATCH (2 let back-to-back gas glitches through)
+    alarm: 3                  # WATCH  -> ALARM
+    clear: 5                  # back down one level
+
+  # Notification cooldown per node: after an ALARM notification, no new ALARM
+  # notification for this long; after a WATCH or ALARM one, no new WATCH one.
+  # State changes are always recorded in the database; this only limits messages.
+  notify_cooldown_minutes: 30
+  # OFFLINE alerts (a burning node goes quiet) fire after
+  # timing.heartbeat_minutes x timing.missed_heartbeats_for_missing.
+  # Derived automatically: do not set offline_after_minutes here.
+
+notifiers:
+  # Any of: console, telegram, sms
+  #   telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID set (see README)
+  #   sms is a STUB: enabling it stops the service from starting until
+  #   gateway/notify/sms.py is implemented
+  enabled: [console]
+  telegram:
+    # Names of the environment variables holding the secrets (never the secrets).
+    bot_token_env: TELEGRAM_BOT_TOKEN
+    chat_id_env: TELEGRAM_CHAT_ID
+    timeout_seconds: 10
+
+web:
+  host: 127.0.0.1
+  port: 8000
+  poll_seconds: 5
+  chart_hours: 6
+
+# Site registry: what operators see instead of hex device identifiers.
+# Keyed by devEUI. A node missing from this list still works; it is shown by
+# its ChirpStack device name and is not placed on the map.
+#
+# !!! PLACEHOLDER POSITIONS !!!
+# Every lat/lon below is MADE UP, scattered around the Bkassine reserve for
+# the demo. They MUST be replaced with coordinates from a real site survey
+# before any deployment: operators will dispatch crews to these points.
+sites:
+  nodes:
+    - dev_eui: "70b3d57ed0000001"
+      label: "F-07-01"
+      block: "F-07"
+      lat: 33.5552   # PLACEHOLDER
+      lon: 35.5631   # PLACEHOLDER
+    - dev_eui: "70b3d57ed0000002"
+      label: "F-07-02"
+      block: "F-07"
+      lat: 33.5561   # PLACEHOLDER
+      lon: 35.5662   # PLACEHOLDER
+    - dev_eui: "70b3d57ed0000003"
+      label: "F-07-03"
+      block: "F-07"
+      lat: 33.5541   # PLACEHOLDER
+      lon: 35.5686   # PLACEHOLDER
+    - dev_eui: "70b3d57ed0000004"
+      label: "F-08-01"
+      block: "F-08"
+      lat: 33.5507   # PLACEHOLDER
+      lon: 35.5703   # PLACEHOLDER
+  gateways:
+    - gateway_id: "0016c001ff100001"
+      label: "GW-01 ridge"
+      lat: 33.5586   # PLACEHOLDER
+      lon: 35.5622   # PLACEHOLDER
+  centre:
+    label: "Bkassine Civil Defence Centre"
+    lat: 33.5489     # PLACEHOLDER
+    lon: 35.5598     # PLACEHOLDER
+
+console:
+  title: "BKASSINE CIVIL DEFENCE CENTRE"
+  subtitle: "Forest fire early-warning and suppression - operator console"
+  map:
+    # Bkassine forest, Jezzine district, Lebanon.
+    centre_lat: 33.5530
+    centre_lon: 35.5660
+    zoom: 15
+    # Level of detail. Below node_detail_zoom (including the default view)
+    # the map shows only gateways and the centre, plus a red marker for every
+    # node in ALARM (an alarm is never hidden by zooming out). From
+    # node_detail_zoom in, every node marker appears; markers closer than
+    # cluster_radius_px on screen collapse into one count badge.
+    # Must be greater than zoom.
+    node_detail_zoom: 17
+    cluster_radius_px: 50
+    # The red zone drawn around nodes in ALARM when zoomed in. This is the
+    # area the SENSORS cover, not the extent of the fire.
+    alarm_zone_radius_m: 150
+    # No API key needed. Both need internet; without it the markers and
+    # alarm zones still draw, on a blank background. Check each provider's
+    # terms of use before production use.
+    primary_tiles:
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+      attribution: "Imagery &copy; Esri, Maxar, Earthstar Geographics, GIS User Community"
+      max_zoom: 19
+    fallback_tiles:
+      url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+      attribution: "&copy; OpenStreetMap contributors"
+      max_zoom: 19
+  # Later project phases. While false, the panel is shown greyed and labelled
+  # "NOT CONNECTED - PLANNED PHASE 2", with no data. Turning one on only
+  # reveals "enabled, no data source configured" until an integration exists.
+  features:
+    thermal_camera: false
+    drone: false
+    wind_station: false
