@@ -7,7 +7,8 @@ gateway sees a realistic uplink pattern instead of one reading per minute:
   - It keeps its own slow gas baseline (EWMA, never frozen). When gas resistance is
     local_trigger.gas_drop_pct below it for confirm_samples reads in a row,
     the node enters ALARM MODE and transmits at once.
-  - In alarm mode it transmits every alarm_interval_minutes, until
+  - In alarm mode it transmits every interval_while_triggered_seconds while the
+    trigger holds, then every interval_after_trigger_minutes until
     alarm_hold_minutes after the trigger last held.
   - Otherwise it transmits a heartbeat every timing.heartbeat_minutes.
   - Alarm-mode uplinks go on lorawan.alarm_mode_f_port, heartbeats on
@@ -15,8 +16,8 @@ gateway sees a realistic uplink pattern instead of one reading per minute:
     knows the mode. The real firmware must do the same.
   - It never transmits sooner than the EU868 duty cycle allows at its
     spreading factor; a due uplink waits for the first sensor read after the
-    gap. (SF11: ~82 s, SF12: ~147 s for this payload, so slow nodes cannot
-    keep a 1-minute alarm rate.)
+    gap. (SF11: ~82 s, SF12: ~148 s for this payload, so slow nodes cannot
+    keep the alarm-mode rates.)
 
 The local trigger only decides the transmit rate. Fire detection is the
 gateway's job (gateway/detect.py); a node in alarm mode is not an alarm.
@@ -59,12 +60,34 @@ class NodeFirmware:
         self._reads = 0
         self._hits = 0
         self._alarm_until: datetime | None = None
+        self._triggered = False  # did the trigger hold on the previous read?
         self.triggers = 0  # times the local trigger fired (for measurement)
+        self.held_by_duty_cycle = 0  # due uplinks that had to wait for the legal gap
 
     @property
     def interval(self) -> timedelta:
         """How often the caller should call step()."""
         return timedelta(seconds=self.fw.sample_seconds)
+
+    def configured_rates(self) -> dict[str, timedelta]:
+        return {
+            "heartbeat": self.heartbeat,
+            "while triggered": timedelta(seconds=self.fw.interval_while_triggered_seconds),
+            "after trigger": timedelta(minutes=self.fw.interval_after_trigger_minutes),
+        }
+
+    def effective_interval(self, configured: timedelta) -> timedelta:
+        """What this node can actually do: the configured interval, or its
+        shortest legal duty-cycle gap if that is longer, rounded up to the next
+        sensor read (the node only transmits on a read)."""
+        reads = math.ceil(max(configured, self.min_gap) / self.interval - 1e-9)
+        return self.interval * max(reads, 1)
+
+    def duty_cycle_limited(self) -> dict[str, timedelta]:
+        """The rates this node cannot keep at its spreading factor, with the
+        interval it falls back to."""
+        return {name: self.effective_interval(every) for name, every in self.configured_rates().items()
+                if every < self.min_gap}
 
     def in_alarm_mode(self, t: datetime) -> bool:
         return self._alarm_until is not None and t < self._alarm_until
@@ -72,8 +95,9 @@ class NodeFirmware:
     def step(self, t: datetime) -> Transmission | None:
         """One sensor read at time t. Returns the uplink, if the node sends one."""
         s = self.model.sample(t)
-        fired = self._local_trigger(t, s.reading.gas_resistance_ohm)
-        if fired:
+        holding = self._local_trigger(t, s.reading.gas_resistance_ohm)
+        newly_fired, self._triggered = holding and not self._triggered, holding
+        if holding:
             self._alarm_until = t + timedelta(minutes=self.fw.alarm_hold_minutes)
 
         alarm = self.in_alarm_mode(t)
@@ -81,10 +105,21 @@ class NodeFirmware:
             due = True
         else:
             since = t - self._last_tx
-            due = fired or since >= (
-                timedelta(minutes=self.fw.alarm_interval_minutes) if alarm else self.heartbeat)
-            if since < self.min_gap:
-                due = False  # duty cycle: must wait, whatever the reason
+            if holding:
+                every = timedelta(seconds=self.fw.interval_while_triggered_seconds)
+            elif alarm:
+                every = timedelta(minutes=self.fw.interval_after_trigger_minutes)
+            else:
+                every = self.heartbeat
+            # Half a read of slack: the live simulator's wall-clock reads are not
+            # exactly sample_seconds apart, and 59.99 s must count as 60 s.
+            due = newly_fired or since >= every - self.interval / 2
+            if due and since < self.min_gap:
+                # EU868 duty cycle: never sooner than the shortest legal gap at this
+                # spreading factor, whatever the reason. The uplink goes out on the
+                # first read after the gap (see effective_interval).
+                self.held_by_duty_cycle += 1
+                return None
         if not due:
             return None
         self._last_tx = t

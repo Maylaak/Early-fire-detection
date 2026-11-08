@@ -158,6 +158,37 @@ def test_redelivered_uplink_is_stored_once(engine):
         assert len(conn.execute(select(readings)).all()) == 1
 
 
+def test_same_node_counter_and_time_is_a_duplicate_whatever_the_dedup_id():
+    ing = Ingestor()
+    assert ing.accept(TOPIC, body(make_envelope(f_cnt=5)), T0) is not None
+    # Same uplink, but a different ChirpStack deduplicationId: still the same reading.
+    assert ing.accept(TOPIC, body(make_envelope(f_cnt=5, deduplicationId="other")), T0) is None
+    assert ing.stats.duplicates == 1
+
+
+def test_frame_counter_reset_is_not_a_duplicate(engine):
+    # A node that rejoins or reboots starts counting from 0 again. Its new
+    # readings have old counters but new times: they must be kept.
+    ing = Ingestor(Store(engine))
+    for f_cnt in range(3):
+        assert ing.handle(TOPIC, body(make_envelope(f_cnt=f_cnt, t=T0 + timedelta(minutes=10 * f_cnt))), T0)
+    later = T0 + timedelta(days=1)
+    for f_cnt in range(3):
+        assert ing.handle(TOPIC, body(make_envelope(f_cnt=f_cnt, t=later + timedelta(minutes=10 * f_cnt))), T0)
+    with engine.connect() as conn:
+        assert len(conn.execute(select(readings)).all()) == 6
+
+
+def test_duplicate_already_in_the_database_is_not_stored_again(engine):
+    raw = body(make_envelope())
+    assert Ingestor(Store(engine)).handle(TOPIC, raw, T0) is not None
+    fresh = Ingestor(Store(engine))  # a restarted service: nothing in memory
+    assert fresh.handle(TOPIC, raw, T0) is None
+    assert fresh.stats.duplicates == 1 and fresh.stats.accepted == 0
+    with engine.connect() as conn:
+        assert len(conn.execute(select(readings)).all()) == 1
+
+
 def test_late_uplink_does_not_move_last_seen_backwards(engine):
     ing = Ingestor(Store(engine))
     ing.handle(TOPIC, body(make_envelope(f_cnt=2, t=T0 + timedelta(minutes=2))), T0)

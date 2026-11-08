@@ -24,22 +24,34 @@ def connect(
     client_name: str,
     subscriptions: list[str] | None = None,
     on_message: MessageHandler | None = None,
+    persistent: bool = False,
 ) -> mqtt.Client:
     """Connect, start the network thread, and (re)subscribe on every connect.
 
     paho reconnects automatically after the first successful connect; topics
     are subscribed in on_connect so they survive a broker restart.
+
+    persistent=True (the detection service): `client_name` is used as the
+    client id as it is, with a persistent session (clean_session=False), so the
+    broker queues QoS 1 messages for us while we are disconnected and delivers
+    them on reconnect. Otherwise the id gets the process id appended and the
+    session is thrown away on disconnect.
     """
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
-        client_id=f"{client_name}-{os.getpid()}",
+        client_id=client_name if persistent else f"{client_name}-{os.getpid()}",
+        clean_session=not persistent,
     )
 
     def _on_connect(client, userdata, flags, reason_code, properties):
         if reason_code.is_failure:
             log.error("MQTT connect refused: %s", reason_code)
             return
-        log.info("MQTT connected to %s:%s", cfg.host, cfg.port)
+        resumed = ""
+        if persistent:
+            resumed = (" (resumed session: queued messages follow)" if flags.session_present
+                       else " (new session: the broker queues for us from now on)")
+        log.info("MQTT connected to %s:%s%s", cfg.host, cfg.port, resumed)
         for topic in subscriptions or []:
             client.subscribe(topic, qos=cfg.qos)
 

@@ -1,9 +1,25 @@
-"""Headless detection service: MQTT -> decode -> store -> detect -> alert.
+"""Headless detection service: MQTT -> decode -> detect -> alert, then store.
 
     python -m gateway.service [--config PATH]
 
 Runs on its own, independent of the web app. Nobody needs to have a browser
 open for readings to be stored and alarms to be raised.
+
+Detection and alerting work from memory and come FIRST; every database write
+goes through a queue (gateway/writer.py) with its own thread. So while the
+service runs, a database outage does not stop detection or alerts: the
+writes wait and are written in order when the database is back. Two limits:
+
+- The service cannot START without the database: it rebuilds every node's
+  baseline from stored readings (otherwise each node would need a fresh
+  warm-up). Start-up waits until the database answers.
+- The operator console (the web app) reads only the database, so during an
+  outage it shows "cannot reach the database". Alerts (console window,
+  Telegram) keep going out.
+
+MQTT: a persistent session (mqtt.service_client_id), so the broker queues
+uplinks while the service is down. Redeliveries are dropped by
+Ingestor.accept before detection.
 
 Nodes are named by their site label (config.yaml "sites", e.g. F-07-03) in
 events, alerts and the console log; the devEUI stays in the database.
@@ -27,16 +43,18 @@ from gateway.codec import SensorReading
 from gateway.config import Config, load_config
 from gateway.db import init_schema, make_engine, utcnow
 from gateway.detect import DetectionEngine, Event
-from gateway.ingest import Ingestor
+from gateway.ingest import Accepted, Ingestor, log_reading
 from gateway.mqtt import BrokerUnavailable, connect
 from gateway.notify import Dispatcher, NotifierConfigError, build_notifiers, headline
-from gateway.store import Store
+from gateway.store import NodeState, Store
+from gateway.writer import EventRef, EventsJob, LogJob, NotifiedJob, ReadingJob, Writer
 
 log = logging.getLogger("gateway.service")
 
 DB_RETRY_SECONDS = 2.0
 HEARTBEAT_SECONDS = 300.0
 OFFLINE_CHECK_SECONDS = 30.0
+STOP_FLUSH_SECONDS = 10.0
 
 T = TypeVar("T")
 
@@ -46,8 +64,8 @@ def _first_line(e: DBAPIError) -> str:
 
 
 def _retry(what: str, fn: Callable[[], T]) -> T | None:
-    """A database outage must not lose readings or alarms: keep retrying.
-    Any other database error is a bad message: log it and return None."""
+    """Start-up only (schema, replay): wait for the database.
+    Any other database error is a bad request: log it and return None."""
     while True:
         try:
             return fn()
@@ -66,29 +84,12 @@ def _label(cfg: Config, dev_eui: str, device_name: str) -> str:
     return cfg.sites.label_for(dev_eui, device_name)
 
 
-def _log_events(store: Store, cfg: Config, tracker: clog.BlockTracker, engine: DetectionEngine,
-                evs: Sequence[Event], t: datetime) -> None:
-    """Node events, plus any change in the block picture, to the console log."""
-    entries = clog.node_entries(evs, cfg.sites)
-    if evs:
-        entries += tracker.update(engine.nodes, t)
-    _retry("writing the console log", lambda: store.append_log(entries))
-
-
-def _gateways_online(cfg: Config, store: Store, now: datetime) -> tuple[int, int]:
-    """(heard within the missing threshold, configured or ever seen)."""
-    rows = store.all_gateways()
-    cutoff = now - timedelta(minutes=cfg.timing.missing_after_minutes)
-    known = {g.gateway_id for g in cfg.sites.gateways} | {r.gateway_id for r in rows}
-    return sum(r.last_seen >= cutoff for r in rows), len(known)
-
-
-def _alert(dispatcher: Dispatcher, evs: Sequence[Event], ids: Sequence[int]) -> None:
+def _alert(dispatcher: Dispatcher, evs: Sequence[Event], refs: Sequence[object]) -> None:
     """Log every event; hand the ones that warrant a message to the notifiers."""
-    for e, event_id in zip(evs, ids):
+    for e, ref in zip(evs, refs):
         if e.notify:
             log.warning("ALERT  %s", e.message)
-            dispatcher.submit(e, event_id)
+            dispatcher.submit(e, ref)
         else:
             log.info("event  %s", e.message)
 
@@ -113,6 +114,57 @@ def _replay(cfg: Config, store: Store, engine: DetectionEngine, now: datetime | 
              ", ".join(f"{d.name}={d.state}" for d in engine.nodes.values()) or "no nodes yet")
 
 
+class Pipeline:
+    """What the service does with each uplink and on each timer, without MQTT.
+    Never touches the database itself: writes go to the writer's queue."""
+
+    def __init__(self, cfg: Config, engine: DetectionEngine, tracker: clog.BlockTracker,
+                 writer: Writer, dispatcher: Dispatcher,
+                 gateways_seen: dict[str, datetime] | None = None):
+        self.cfg = cfg
+        self.engine = engine
+        self.tracker = tracker
+        self.writer = writer
+        self.dispatcher = dispatcher
+        self.gateways_seen = gateways_seen if gateways_seen is not None else {}
+
+    def on_uplink(self, got: Accepted, received_at: datetime) -> None:
+        up, reading = got.uplink, got.reading
+        for g in up.gateways:
+            last = self.gateways_seen.get(g.gateway_id)
+            if last is None or up.time > last:
+                self.gateways_seen[g.gateway_id] = up.time
+        ev = self.engine.process(up.dev_eui, _label(self.cfg, up.dev_eui, up.device_name),
+                                 up.time, reading)
+        log_reading(up, reading, "received")
+        self.writer.submit(ReadingJob(up, reading, received_at, ev,
+                                      NodeState.of(self.engine.nodes[up.dev_eui])))
+        self._raise(ev.events, up.time)
+
+    def check_offline(self, now: datetime) -> None:
+        self._raise(self.engine.check_offline(now), now)
+
+    def system_check(self, now: datetime) -> None:
+        """(Gateways heard within the missing threshold)/(configured or ever seen),
+        from memory, so it works while the database is down."""
+        cutoff = now - timedelta(minutes=self.cfg.timing.missing_after_minutes)
+        known = {g.gateway_id for g in self.cfg.sites.gateways} | set(self.gateways_seen)
+        online = sum(t >= cutoff for t in self.gateways_seen.values())
+        self.writer.submit(LogJob([clog.system_check(now, self.engine.nodes, online, len(known))]))
+
+    def _raise(self, evs: Sequence[Event], t: datetime) -> None:
+        """Store the events (queued), alert at once, log them and any change in
+        the block picture."""
+        if not evs:
+            return
+        refs = [EventRef() for _ in evs]
+        states = {e.dev_eui: NodeState.of(self.engine.nodes[e.dev_eui]) for e in evs}
+        self.writer.submit(EventsJob(evs, refs, states))
+        _alert(self.dispatcher, evs, refs)
+        entries = clog.node_entries(evs, self.cfg.sites) + self.tracker.update(self.engine.nodes, t)
+        self.writer.submit(LogJob(entries))
+
+
 def run(cfg: Config) -> int:
     try:
         notifiers = build_notifiers(cfg.notifiers)
@@ -121,35 +173,43 @@ def run(cfg: Config) -> int:
         return 1
     log.info("notifiers: %s", ", ".join(n.name for n in notifiers) or "none")
 
+    # Start-up needs the database (schema, baselines). It waits for it.
     db = make_engine(cfg.database.url)
     log.info("database: %s", db.url.render_as_string(hide_password=True))
     _retry("schema setup", lambda: init_schema(db))
     store = Store(db)
-    ingestor = Ingestor(store)
     engine = DetectionEngine(cfg.detection)
     _retry("startup replay", lambda: _replay(cfg, store, engine))
+    gateways_seen = {r.gateway_id: r.last_seen for r in _retry("reading gateways", store.all_gateways) or []}
     tracker = clog.BlockTracker(cfg.sites)
     tracker.prime(engine.nodes)
 
-    def on_result(e: Event, _id: int, channel: str, ok: bool, detail: str) -> None:
-        entry = clog.notification(utcnow(), headline(e), e.node_name, channel, ok, detail, e.dev_eui)
-        _retry("writing the console log", lambda: store.append_log([entry]))
+    # From here on, nothing waits for the database.
+    writer = Writer(store, cfg.database.max_queued_writes).start()
 
-    dispatcher = Dispatcher(notifiers, on_delivered=lambda event_id: _retry(
-        "marking event notified", lambda: store.mark_notified([event_id])),
-        on_result=on_result).start()
+    def on_result(e: Event, _ref: object, channel: str, ok: bool, detail: str) -> None:
+        writer.submit(LogJob([clog.notification(utcnow(), headline(e), e.node_name, channel, ok,
+                                                detail, e.dev_eui)]))
+
+    dispatcher = Dispatcher(notifiers, on_delivered=lambda ref: writer.submit(NotifiedJob(ref)),
+                            on_result=on_result).start()
+    pipeline = Pipeline(cfg, engine, tracker, writer, dispatcher, gateways_seen)
+    ingestor = Ingestor()
 
     # paho delivers messages on its own thread; process them here, one at a time.
+    # paho acknowledges a QoS 1 message to the broker once it is in this inbox.
     inbox: queue.Queue[tuple[str, bytes, object]] = queue.Queue()
     try:
-        client = connect(cfg.mqtt, "wildfire-service", [cfg.mqtt.uplink_topic],
-                         lambda msg: inbox.put((msg.topic, msg.payload, utcnow())))
+        client = connect(cfg.mqtt, cfg.mqtt.service_client_id, [cfg.mqtt.uplink_topic],
+                         lambda msg: inbox.put((msg.topic, msg.payload, utcnow())), persistent=True)
     except BrokerUnavailable as e:
         log.error("%s", e)
+        writer.stop(STOP_FLUSH_SECONDS)
+        dispatcher.stop()
         return 1
 
     log.info("detection service running, listening on %s. Ctrl+C to stop.", cfg.mqtt.uplink_topic)
-    _retry("writing the console log", lambda: store.append_log([clog.service_started(
+    writer.submit(LogJob([clog.service_started(
         utcnow(), len(engine.nodes), [n.name for n in notifiers], cfg.timing.demo_speedup)]))
     next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
     # Offline checks run often enough for a demo speed-up's short thresholds.
@@ -164,54 +224,36 @@ def run(cfg: Config) -> int:
             except queue.Empty:
                 pass
             else:
-                ingested = _retry(f"message on {topic}",
-                                  lambda: ingestor.handle(topic, body, received_at))
-                if ingested is not None:
-                    up = ingested.uplink
-                    ev = engine.process(up.dev_eui, _label(cfg, up.dev_eui, up.device_name),
-                                        up.time, ingested.reading)
-                    node = engine.nodes[up.dev_eui]
-                    ids = _retry("saving detection result",
-                                 lambda: store.save_evaluation(ingested.reading_id, ev, node))
-                    if ids is not None:
-                        _alert(dispatcher, ev.events, ids)
-                        _log_events(store, cfg, tracker, engine, ev.events, up.time)
+                got = ingestor.accept(topic, body, received_at)
+                if got is not None:
+                    pipeline.on_uplink(got, received_at)
 
             now_m = time.monotonic()
             if now_m >= next_offline_check:
                 next_offline_check = now_m + offline_every
-                now = utcnow()
-                offline = engine.check_offline(now)
-                if offline:
-                    ids = _retry("saving offline events", lambda: store.save_events(offline, engine.nodes))
-                    if ids is not None:
-                        _alert(dispatcher, offline, ids)
-                        _log_events(store, cfg, tracker, engine, offline, now)
+                pipeline.check_offline(utcnow())
 
             if now_m >= next_system_check:
                 next_system_check = now_m + system_check_every
-                now = utcnow()
-                gw = _retry("reading gateways", lambda: _gateways_online(cfg, store, now)) or (0, 0)
-                _retry("writing the console log", lambda: store.append_log(
-                    [clog.system_check(now, engine.nodes, *gw)]))
+                pipeline.system_check(utcnow())
 
             if now_m >= next_heartbeat:
                 next_heartbeat = now_m + HEARTBEAT_SECONDS
                 s = ingestor.stats
-                log.info("alive: %d stored, %d duplicates, %d rejected, %d queued; %s",
-                         s.stored, s.duplicates, s.rejected, inbox.qsize(),
+                log.info("alive: %d accepted, %d duplicates, %d rejected, %d queued; "
+                         "database %s, %d writes waiting, %d dropped; %s",
+                         s.accepted, s.duplicates, s.rejected, inbox.qsize(),
+                         "DOWN" if writer.database_down else "ok", writer.pending, writer.dropped,
                          ", ".join(f"{d.name}={d.state}" for d in engine.nodes.values()))
     except KeyboardInterrupt:
-        log.info("stopping (sending any queued alerts first)")
+        log.info("stopping (sending any queued alerts and writes first)")
         return 0
     finally:
         client.loop_stop()
         client.disconnect()
         dispatcher.stop()
-        try:  # best effort: the database may be the reason we are stopping
-            store.append_log([clog.service_stopped(utcnow())])
-        except DBAPIError:
-            pass
+        writer.submit(LogJob([clog.service_stopped(utcnow())]))
+        writer.stop(STOP_FLUSH_SECONDS)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -177,7 +177,7 @@ def test_smoke_switches_to_alarm_mode_within_minutes():
     # Sent at once, not at the next heartbeat.
     assert first.sample.time - inject <= timedelta(minutes=3)
     during = [t for t in txs if inject <= t.sample.time <= inject + timedelta(minutes=30)]
-    assert len(during) >= 25  # ~1 per minute instead of 3 heartbeats
+    assert len(during) >= 25  # every minute instead of 3 heartbeats
     # Back to heartbeats after the smoke and the hold period.
     assert txs[-1].reason == HEARTBEAT
 
@@ -209,7 +209,68 @@ def test_duty_cycle_limits_slow_nodes_in_alarm_mode():
     txs = [t for t in drive(fw, 4 * 60) if t.sample.time >= inject]
     gaps = gaps_minutes(txs)
     assert min(gaps) * 60 >= duty_cycle_gap_seconds(12, 11, FW.duty_cycle)
-    assert min(gaps) > FW.alarm_interval_minutes  # cannot keep a 1-minute rate at SF12
+    assert min(gaps) > FW.interval_after_trigger_minutes  # cannot keep a 1-minute rate at SF12
+
+
+def alarm_mode_gaps(fw):
+    """Gaps between alarm-mode uplinks while the trigger holds and after, in seconds."""
+    fw.model.inject_smoke(T0 + timedelta(hours=3))
+    holding, after, last = [], [], None
+    t = T0
+    while t < T0 + timedelta(hours=4):
+        tx = fw.step(t)
+        if tx is not None:
+            if tx.reason == ALARM_MODE and last is not None and last.reason == ALARM_MODE:
+                (holding if fw._triggered else after).append((t - last.sample.time).total_seconds())
+            last = tx
+        t += fw.interval
+    return holding, after
+
+
+def test_alarm_mode_rates_come_from_config():
+    # Default: every sensor read (60 s, the power study's rate) while the
+    # trigger holds, then every minute.
+    holding, after = alarm_mode_gaps(firmware())
+    assert holding and set(holding) == {FW.interval_while_triggered_seconds} == {60}
+    assert after and set(after) == {FW.interval_after_trigger_minutes * 60}
+    # The setting really is the rate: 120 s while triggered gives 120 s gaps.
+    slower = FW.model_copy(update={"interval_while_triggered_seconds": 120})
+    holding, _ = alarm_mode_gaps(firmware(fw=slower))
+    assert holding and set(holding) == {120}
+
+
+@pytest.mark.parametrize("snr, sf, gap_s, falls_back_to_s", [(-6.5, 11, 82, 120), (-25.0, 12, 148, 180)])
+def test_slow_nodes_fall_back_to_their_shortest_legal_gap(snr, sf, gap_s, falls_back_to_s):
+    fw = firmware(node=NODE.model_copy(update={"snr_db": snr}))
+    assert fw.model.spreading_factor == sf
+    assert round(fw.min_gap.total_seconds()) == gap_s
+    # Both alarm-mode rates are faster than the law allows at this SF: declared up front...
+    limited = fw.duty_cycle_limited()
+    assert set(limited) == {"while triggered", "after trigger"}
+    assert {e.total_seconds() for e in limited.values()} == {falls_back_to_s}
+    assert "heartbeat" not in limited
+    # ...and that is what the node actually does: the legal gap, never less.
+    holding, after = alarm_mode_gaps(fw)
+    assert holding and set(holding) == {falls_back_to_s}
+    assert min(holding + after) >= fw.min_gap.total_seconds()
+    assert fw.held_by_duty_cycle > 0
+
+
+def test_fast_nodes_keep_the_configured_rates():
+    fw = firmware()
+    assert fw.model.spreading_factor <= 10
+    assert fw.duty_cycle_limited() == {}
+    holding, _ = alarm_mode_gaps(fw)
+    assert set(holding) == {FW.interval_while_triggered_seconds}
+
+
+def test_wall_clock_jitter_does_not_skip_a_read():
+    fw = firmware()
+    fw.model.inject_smoke(T0 + timedelta(hours=3))
+    drive(fw, 3 * 60 + 15)  # into alarm mode, trigger holding
+    assert fw._triggered
+    t = fw._last_tx + timedelta(seconds=FW.interval_while_triggered_seconds - 0.01)
+    assert fw.step(t) is not None  # 59.99 s after the last uplink still counts as 60 s
 
 
 def test_demo_speedup_scales_firmware_timing():

@@ -6,8 +6,8 @@
 const STATE_COLOR = { NORMAL: "#3fbf6f", WATCH: "#f2b23a", ALARM: "#e5322b", WARMUP: "#6e7886",
                       MISSING: "#6e7886", NO_DATA: "#6e7886", NEVER: "#6e7886" };
 const MISSING_COLOR = "#6e7886";
-// Worst first. Blocks and clusters take the worst state of the nodes inside,
-// so an alarm reads red at every zoom level. (Same order as the server.)
+// Worst first. A cluster badge (zoomed in) takes the worst state of the
+// nodes inside it, so a group holding an alarm reads red. (Same order as the server.)
 const STATE_RANK = ["ALARM", "WATCH", "MISSING", "WARMUP", "NORMAL", "NO_DATA", "NEVER"];
 const rankOf = st => { const i = STATE_RANK.indexOf(st); return i < 0 ? STATE_RANK.length : i; };
 const worstOf = states => states.reduce((a, b) => (rankOf(b) < rankOf(a) ? b : a), "NEVER");
@@ -15,8 +15,8 @@ const PILL_TEXT = { FIRE_ALARM: "FIRE ALARM", WATCH: "WATCH", ALL_CLEAR: "ALL CL
                     WARMING_UP: "WARMING UP" };
 const BASE_TITLE = document.title;
 // Shown only while a node is in alarm-mode transmission (never on its normal heartbeat).
-const RAPID_TIP = "This node's own sensor noticed a change, so it is now reporting about every " +
-  "minute instead of on its normal schedule. This is not a fire alarm by itself: the console " +
+const RAPID_TIP = "This node's own sensor noticed a change, so it is now reporting every minute " +
+  "instead of on its normal schedule. This is not a fire alarm by itself: the console " +
   "raises WATCH or FIRE ALARM only when the readings confirm it.";
 
 let CC = null;          // /api/console/config
@@ -116,7 +116,7 @@ function setMapNote(text) {
 function nodePopup(n) {
   const r = n.latest || {};
   return `<b>${esc(n.label)}</b> ${badge(n.state)} ${n.missing ? badge("MISSING") : ""}<br>
-    ${n.rapid_updates ? `<span class="rapid" title="${esc(RAPID_TIP)}">RAPID UPDATES</span> reporting about every minute<br>` : ""}
+    ${n.rapid_updates ? `<span class="rapid" title="${esc(RAPID_TIP)}">RAPID UPDATES</span> reporting every minute<br>` : ""}
     Block ${esc(n.block || "-")} · last seen ${esc(fmtAgo(n.last_seen))}<br>
     T ${fmt(r.temperature_c, 1)} &deg;C · RH ${fmt(r.humidity_pct, 0)} % · gas ${gasVs(r)}<br>
     <span class="muted small">devEUI ${esc(n.dev_eui)}</span><br>

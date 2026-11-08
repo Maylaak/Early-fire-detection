@@ -117,7 +117,7 @@ def test_long_normal_operation_never_alarms(seed, weather):
 
 # --- the same two, at the deployed cadence ----------------------------------
 # The gateway only sees what the (placeholder) node firmware transmits: a
-# heartbeat every 10 min, or ~1/min in alarm mode, duty cycle permitting.
+# heartbeat every 10 min, or every minute in alarm mode, duty cycle permitting.
 
 HARSH = SIM.model_copy(update={
     "weather": SIM.weather.model_copy(update={"rain_events_per_day": 1.0}),

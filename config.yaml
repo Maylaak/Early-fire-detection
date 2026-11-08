@@ -16,6 +16,10 @@ mqtt:
   uplink_topic: "application/+/device/+/event/up"
   qos: 1
   keepalive_seconds: 60
+  # The detection service connects with this fixed id and a persistent
+  # session, so the broker holds uplinks (QoS 1) while the service is down and
+  # delivers them when it reconnects. Run ONE detection service per broker.
+  service_client_id: wildfire-service
 
 database:
   # Detection service: read/write.
@@ -23,6 +27,12 @@ database:
   # Web app: read-only role (created by db/init/01-readonly-role.sql).
   web_url: "postgresql+psycopg://webapp_ro:webapp_ro@localhost:5432/wildfire"
   # SQLite fallback (no Docker): set both to "sqlite:///data/wildfire.db"
+  # If the database goes down while the detection service runs, detection and
+  # alerts carry on and the writes wait in memory, up to this many. Past it the
+  # oldest READING writes are dropped; events and log lines never are.
+  # 200 000 is about 4 days at 300 nodes. (The service cannot START without
+  # the database: it needs the stored readings to rebuild baselines.)
+  max_queued_writes: 200000
 
 timing:
   # Nodes report on a slow heartbeat (LoRaWAN duty cycle, battery), and ALSO
@@ -44,7 +54,7 @@ timing:
 # LoRaWAN application ports (fPort) the node firmware sends on.
 # PLACEHOLDER until the real firmware exists, and a REQUIREMENT on it: the
 # gateway tells a normal heartbeat from an alarm-mode uplink (the node's own
-# sensor saw a change and it now reports about every minute) by this port,
+# sensor saw a change and it now reports every minute) by this port,
 # never by guessing from timing. Same 11-byte payload on both ports.
 lorawan:
   heartbeat_f_port: 2
@@ -90,7 +100,11 @@ simulator:
     rain_humidity_rise_pct: 25.0
     rain_temperature_drop_c: 4.0
 
-  battery_drain_v_per_day: 0.01
+  # ER34615 lithium-thionyl chloride cell (the power study): 3.6 V nominal and
+  # almost flat for most of its ~3-year life, then a sudden drop at the end.
+  # Voltage is therefore a poor fuel gauge: it says little until the cell is
+  # nearly empty. 0.0001 V/day is about 0.1 V over three years.
+  battery_drain_v_per_day: 0.0001
 
   smoke:                      # profile applied by "python -m gateway.sim inject"
     ramp_minutes: 5
@@ -103,12 +117,19 @@ simulator:
   # decide WHEN a simulated node transmits; the gateway does not read them.
   # The node reads its sensor every sample_seconds. It transmits:
   #   - a heartbeat every timing.heartbeat_minutes, and
-  #   - straight away when its local trigger fires, then every
-  #     alarm_interval_minutes until alarm_hold_minutes after it clears,
+  #   - straight away when its local trigger fires,
+  #   - then every interval_while_triggered_seconds while the trigger holds,
+  #   - then every interval_after_trigger_minutes until alarm_hold_minutes after it clears,
   # never faster than the EU868 duty cycle allows at its spreading factor
-  # (1 % for 11 bytes: SF7 ~6 s between uplinks ... SF11 ~82 s, SF12 ~147 s).
+  # (1 % for 11 bytes: SF7 ~6 s between uplinks ... SF11 ~82 s, SF12 ~148 s),
+  # and only on a sensor read (so a slow node's gap rounds up to the next read).
+  # Read rate from the power study (Power Analysis & Architecture, VIP402):
+  # wake every 60 s, 5 s awake, about 3 years on the battery. Reading every
+  # 30 s would halve that (about 1.6 years) for a faster alarm.
+  # Measured with 60 s reads: median 8 min from smoke to ALARM on fast nodes
+  # (5.5 min with 30 s reads); SF11 ~13 min, SF12 ~18 min (duty-cycle limited).
   firmware:
-    sample_seconds: 30
+    sample_seconds: 60
     local_trigger:
       # The node's own slow gas baseline. Gas only: the gateway needs a gas
       # drop for WATCH anyway, and a local temperature trigger would fire on
@@ -117,7 +138,8 @@ simulator:
       warmup_samples: 20
       gas_drop_pct: 15          # more sensitive than the gateway's WATCH (25)
       confirm_samples: 2        # a one-off gas glitch does not trigger
-    alarm_interval_minutes: 1
+    interval_while_triggered_seconds: 60  # while the local trigger holds (every read)
+    interval_after_trigger_minutes: 1     # after it clears, for alarm_hold_minutes
     alarm_hold_minutes: 10
     duty_cycle: 0.01            # EU868 868.0-868.6 MHz sub-band
 
@@ -129,7 +151,7 @@ simulator:
       humidity_pct: 55.0
       pressure_hpa: 1008.0
       gas_resistance_ohm: 180000
-      battery_v: 3.95
+      battery_v: 3.62
       rssi_dbm: -92
       snr_db: 7.5
     - name: node-2
@@ -139,7 +161,7 @@ simulator:
       humidity_pct: 60.0
       pressure_hpa: 1002.0
       gas_resistance_ohm: 240000
-      battery_v: 4.05
+      battery_v: 3.65
       rssi_dbm: -105
       snr_db: 2.0
     - name: node-3
@@ -149,7 +171,7 @@ simulator:
       humidity_pct: 48.0
       pressure_hpa: 995.0
       gas_resistance_ohm: 150000
-      battery_v: 3.80
+      battery_v: 3.60
       rssi_dbm: -98
       snr_db: 5.0
     - name: node-4
@@ -159,7 +181,7 @@ simulator:
       humidity_pct: 65.0
       pressure_hpa: 985.0
       gas_resistance_ohm: 300000
-      battery_v: 3.70
+      battery_v: 3.63
       rssi_dbm: -114
       snr_db: -6.5
 

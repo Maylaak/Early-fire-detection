@@ -112,6 +112,12 @@ docker compose ps
 Both containers should be "running" (Postgres also "healthy"). They keep
 running in the background until `docker compose down`.
 
+Mosquitto keeps the detection service's queued messages on disk (volume
+`mosquitto-data`). If your containers were created before that was added,
+run `docker compose up -d` once more: it recreates the Mosquitto container
+with the new volume and `mosquitto/mosquitto.conf`. Postgres and its data are
+not touched.
+
 ### 2.2 Demo speed-up
 
 Real nodes report every **10 minutes**, and each node needs **30 readings**
@@ -249,8 +255,8 @@ a control-room screen.
   one line per affected block ("Block F-07 - VOC up - temperature up -
   humidity down"), and a node table with honest "last seen" times.
   **RAPID UPDATES** (hover for an explanation) appears only while a node's
-  own sensor has noticed a change and it reports about every minute instead
-  of every 10; it is not a fire alarm by itself. A node on its normal
+  own sensor has noticed a change and it reports every minute instead
+  of every 10 min; it is not a fire alarm by itself. A node on its normal
   heartbeat shows nothing. **MISSING** means 3 heartbeats have been missed. The table scrolls, alerting and missing
   nodes first. Counts come from the database, never from what the map is
   drawing (a node in the registry that has never reported is on the map but
@@ -330,11 +336,15 @@ Settings: `timing` and `simulator.firmware` in `config.yaml`.
 - **Heartbeat**: every node transmits every **10 minutes**
   (`timing.heartbeat_minutes`), enough to know it is alive, cheap on
   battery and airtime.
-- **Event-driven**: the node reads its sensor every 30 s and keeps its own
-  slow gas baseline. When gas resistance is 15 % below it on 2 reads in a
-  row (more sensitive than the gateway's WATCH, and a one-off glitch cannot
-  trigger it), the node transmits **at once**, then about **every minute**
-  until 10 minutes after the trigger clears.
+- **Event-driven**: the node reads its sensor every **60 s**
+  (`sample_seconds`, the rate in the team's power study: about 3 years on
+  the battery) and keeps its own slow gas baseline. When gas resistance is
+  15 % below it on 2 reads in a row (more sensitive than the gateway's
+  WATCH, and a one-off glitch cannot trigger it), the node transmits **at
+  once**, then **every minute** (every read) while the trigger holds
+  (`interval_while_triggered_seconds`) and until 10 minutes after it clears
+  (`interval_after_trigger_minutes`). Fast nodes reach ALARM in a median
+  8 min. Reading every 30 s would give 5.5 min but halve battery life.
 - **Which mode, by port**: heartbeats are sent on LoRaWAN fPort **2**,
   alarm-mode uplinks on fPort **3** (`lorawan:` in `config.yaml`; same
   payload). The console shows RAPID UPDATES from the port the node used,
@@ -352,7 +362,8 @@ Settings: `timing` and `simulator.firmware` in `config.yaml`.
   | min gap | 6 s | 11 s | 21 s | 37 s | 82 s | 148 s |
 
   The simulator enforces this, so a node far from the gateway (SF11/SF12)
-  cannot keep a 1-minute alarm rate.
+  cannot keep the alarm-mode rate: in practice SF11 sends every 2 min and
+  SF12 every 3 min (the gap, rounded up to the next 60 s sensor read).
 
 > The node **firmware does not exist yet**. `simulator.firmware` is a
 > placeholder describing the behaviour the gateway expects. Without the
@@ -365,10 +376,10 @@ Settings: `timing` and `simulator.firmware` in `config.yaml`.
 | | Result |
 |---|---|
 | False WATCH/ALARM, 336 node-days (typical + harsh weather) | **0** |
-| Smoke reaching ALARM, 240 events, every 2 h of the day, nodes at SF7-SF11 | **238** |
-| Time from smoke start to ALARM | median **5.5 min**, worst 11.5 min |
-| Same, a node at SF12 (duty-cycle limited) | 59 of 60, median **17.5 min** |
-| Uplinks per node per day | ~144 (148 in harsh weather) |
+| Smoke reaching ALARM, 240 events, every 2 h of the day, nodes at SF7-SF11 | **239** |
+| Time from smoke start to ALARM | median **8 min**, worst 15 min (SF11) |
+| Same, a node at SF12 (duty-cycle limited) | 60 of 60, median **18 min** |
+| Uplinks per node per day | ~144 (146 in harsh weather) |
 
 ---
 
@@ -411,6 +422,23 @@ All thresholds are in [`config.yaml`](config.yaml) under `detection`.
 - **Restarts.** The service rebuilds baselines from the last 12 h of stored
   readings, so a restart does not mean another warm-up, and nothing is
   alerted twice.
+- **No readings lost while the service is down.** The service connects to
+  Mosquitto with a fixed client id (`mqtt.service_client_id`) and a
+  persistent session, so the broker queues uplinks (QoS 1) while it is
+  stopped and delivers them when it is back, oldest first. A reading is
+  identified by **node + frame counter + uplink time**; a redelivered one is
+  dropped before detection, and the database's unique key stops any that
+  slip through. A node whose frame counter resets (rejoin, reboot) is not a
+  duplicate: its times are new.
+- **Database outage while running.** Detection and alerts work from memory
+  and come first; every database write goes to a queue with its own thread
+  (`gateway/writer.py`), retried every 2 s and written in order when the
+  database is back. The queue holds up to `database.max_queued_writes`
+  (200,000) jobs: one per reading, so about 4 days of 300 nodes at the
+  10-minute heartbeat (less if many are in alarm mode). Past that,
+  the **oldest stored-reading writes are dropped** (logged); events, the
+  notified flag and event-log lines are never dropped. The service logs
+  `alive: ...; database DOWN, N writes waiting, M dropped` every 5 minutes.
 
 ### Tuning decisions (measured on the simulator)
 
@@ -425,11 +453,30 @@ All thresholds are in [`config.yaml`](config.yaml) under `detection`.
 
 ### Known limitations
 
+- **The service cannot start without the database.** It rebuilds every
+  node's baseline from stored readings at start-up (otherwise each node
+  needs a fresh 30-reading warm-up), so it waits there until the database
+  answers. Uplinks meanwhile wait in Mosquitto; nothing is detected or
+  alerted until the database is up. Only an outage *after* start-up is
+  covered.
+- **The console goes blind during a database outage.** The web app reads
+  only the database, so it shows "console cannot reach the database" while
+  the database is down, even though the service is still detecting and
+  sending alerts (console window, Telegram). When the database is back the
+  queued writes land and the console catches up.
+- **Queued writes live in the service's memory.** If the service is killed
+  during an outage, writes still waiting are lost (logged on a normal stop).
+  Messages are acknowledged to the broker once received, before they are
+  stored, so the broker will not resend those. Their alerts already went out.
+- **One detection service per broker.** The fixed client id means a second
+  service started against the same broker takes the session over from the
+  first.
+
 - **Fire starting at the onset of rain/fog** can still stop at WATCH
-  (2 of 240 simulated events): rain cools and humidifies the air at the same
+  (1 of 240 simulated events): rain cools and humidifies the air at the same
   time, masking the temperature/humidity signature. WATCH still alerts.
 - **Slow nodes alarm later.** At SF12 the duty cycle stretches alarm-mode
-  uplinks to ~2.5 min: median 17.5 min to ALARM. Place gateways so nodes
+  uplinks to 3 min: median 18 min to ALARM (13 min at SF11). Place gateways so nodes
   stay at SF11 or faster.
 - **Stepping down is slow at heartbeat rate.** After the node leaves alarm
   mode, "back to NORMAL" needs 5 readings: up to ~50 minutes.
@@ -438,6 +485,12 @@ All thresholds are in [`config.yaml`](config.yaml) under `detection`.
 - **Hot-day VOCs.** Vegetation emits terpenes on hot days, which can lower
   BME688 gas resistance while the air is hot and dry. The simulator does not
   model this; the thresholds need real field data or a controlled burn.
+- **No low-battery warning.** Nodes report their battery voltage, but the
+  ER34615 cell from the power study stays near 3.6 V for most of its life
+  and drops only at the very end, so a voltage threshold would warn too
+  late. A useful warning needs the firmware to count its own usage (time
+  awake, uplinks sent) and report an estimate. The simulator models the
+  flat cell (3.6 V, about 0.1 V lost over three years).
 - **BME688 burn-in.** New sensors need about 24-48 h before gas readings are
   stable; the 30-sample warm-up does not cover that.
 - **Gateway "online"** is judged from relayed uplinks only. A gateway that
@@ -533,7 +586,12 @@ pytest
 - `tests/test_config.py`: derived missing threshold, speed-up, site registry.
 - `tests/test_codec.py`: payload round-trips, edge values, bad input.
 - `tests/test_ingest.py`, `test_service.py`: storage, gateways, detection
-  persisted, labels in messages, restart replay, the event log story.
+  persisted, labels in messages, restart replay, the event log story,
+  duplicates (redelivery, after a restart, frame-counter reset), a database
+  outage mid-alarm (alerts still go out, everything is written afterwards),
+  the write-queue cap, and the persistent MQTT session. One test uses a real
+  broker; it runs only when `TEST_MQTT_HOST` (and `TEST_MQTT_PORT`) point
+  at a **scratch** Mosquitto, since it creates and removes sessions there.
 - `tests/test_console_log.py`: event-log entries and block roll-up.
 - `tests/test_web.py`, `test_web_console.py`: the read-only API, the
   console status (pill, missing, zones, no devEUI outside its fields), block
@@ -568,6 +626,7 @@ gateway/
   detect.py              detection engine (pure logic, no I/O)
   console_log.py         operator event-log entries, block roll-up
   service.py             detection service entry point
+  writer.py              queued database writes (survives a database outage)
   notify/                console, telegram, sms (stub), dispatcher
   sim/                   node model, placeholder firmware, simulator CLI
   web/                   FastAPI app, console API, static pages
@@ -583,7 +642,10 @@ tests/
 | Problem | Fix |
 |---|---|
 | `cannot reach MQTT broker at localhost:1883` | Start Docker Desktop, then `docker compose up -d` (or start Mosquitto, section 8). |
-| `database not reachable yet` (repeats) | Postgres is not up: `docker compose ps`. The service keeps retrying on its own. |
+| `database unavailable during startup replay` (repeats) | Postgres is not up: `docker compose ps`. The service cannot start without it and keeps retrying on its own. |
+| `database unavailable (...): writes are queued` | Postgres went down while the service runs. Detection and alerts continue; the console shows "cannot reach the database" until Postgres is back. |
+| `write queue full ... dropped the oldest stored-reading write` | A long database outage hit `database.max_queued_writes`. Old readings are being dropped; events are kept. Bring Postgres back. |
+| Service logs `MQTT connected ... (new session ...)` after a restart | The broker lost the session (Mosquitto restarted without its `mosquitto-data` volume, or the session expired after 7 days). Uplinks sent while the service was down are lost. |
 | `docker compose up` says port 5432 or 1883 is already in use | A local PostgreSQL or Mosquitto service already uses it. Stop it (Services app), or use it as in section 8. |
 | Pill says **NO DATA** | Is the simulator (or ChirpStack) running? Is the detection service running? |
 | Pill stays **WARMING UP** | Normal for 30 readings: 5 h in real time, ~5 min with `DEMO_SPEEDUP=60`. |

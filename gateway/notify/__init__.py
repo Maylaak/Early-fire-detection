@@ -7,6 +7,7 @@ build_notifiers(). send() raises NotifierError on failure.
 The Dispatcher sends from a background thread, so a slow or unreachable
 service (e.g. Telegram with no internet) never delays detection. An event is
 marked `notified` in the database once at least one notifier delivered it.
+Sending does not depend on the database: alerts go out while it is down.
 An optional on_result callback hears each channel's final outcome (sent, or
 given up after retries), for the operator console's event log.
 """
@@ -87,23 +88,25 @@ class Dispatcher:
     def __init__(
         self,
         notifiers: Sequence[Notifier],
-        on_delivered: Callable[[int], None],
+        on_delivered: Callable[[object], None],
         retry_delays: Sequence[float] = RETRY_DELAYS_SECONDS,
-        on_result: Callable[[Event, int, str, bool, str], None] | None = None,
+        on_result: Callable[[Event, object, str, bool, str], None] | None = None,
     ):
         self.notifiers = list(notifiers)
         self.on_delivered = on_delivered
         # (event, event_id, notifier name, delivered?, last error) per channel.
+        # event_id is whatever the caller passed to submit(): a database id, or a
+        # reference to an event not written yet (the database may be down).
         self.on_result = on_result
         self.retry_delays = retry_delays
-        self._queue: queue.Queue[tuple[Event, int] | None] = queue.Queue()
+        self._queue: queue.Queue[tuple[Event, object] | None] = queue.Queue()
         self._thread = threading.Thread(target=self._run, name="notifier", daemon=True)
 
     def start(self) -> Dispatcher:
         self._thread.start()
         return self
 
-    def submit(self, event: Event, event_id: int) -> None:
+    def submit(self, event: Event, event_id: object) -> None:
         self._queue.put((event, event_id))
 
     def stop(self, timeout: float = 10.0) -> None:
@@ -111,7 +114,7 @@ class Dispatcher:
         self._queue.put(None)
         self._thread.join(timeout)
 
-    def deliver(self, event: Event, event_id: int) -> bool:
+    def deliver(self, event: Event, event_id: object) -> bool:
         """Send to all notifiers; retry only the ones that failed, so a broken
         channel never holds up the working ones. True if at least one delivered."""
         delivered = False
@@ -125,7 +128,7 @@ class Dispatcher:
                 except Exception as e:  # any failure: retry this channel later
                     failed.append(n)
                     errors[n.name] = str(e) or type(e).__name__
-                    log.warning("%s notifier failed for event %d: %s", n.name, event_id, e)
+                    log.warning("%s notifier failed for event %s: %s", n.name, event_id, e)
                 else:
                     if not delivered:  # mark as soon as the first channel succeeds
                         delivered = True
@@ -137,17 +140,17 @@ class Dispatcher:
             if attempt < len(self.retry_delays):
                 time.sleep(self.retry_delays[attempt])
         for n in pending:
-            log.error("%s notifier gave up on event %d", n.name, event_id)
+            log.error("%s notifier gave up on event %s", n.name, event_id)
             self._report(event, event_id, n.name, False, errors.get(n.name, ""))
         return delivered
 
-    def _report(self, event: Event, event_id: int, channel: str, ok: bool, detail: str) -> None:
+    def _report(self, event: Event, event_id: object, channel: str, ok: bool, detail: str) -> None:
         if self.on_result is None:
             return
         try:
             self.on_result(event, event_id, channel, ok, detail)
         except Exception:  # the log is secondary: never let it stop delivery
-            log.exception("recording the %s result for event %d failed", channel, event_id)
+            log.exception("recording the %s result for event %s failed", channel, event_id)
 
     def _run(self) -> None:
         while True:

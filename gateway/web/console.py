@@ -4,10 +4,12 @@
     /api/console/status   status pill, nodes, gateways, blocks, map blocks, alarm zones
     /api/console/log      event log, oldest first; ?after_id= for new lines
 
-The map draws per-block aggregates when zoomed out ("map_blocks": one per
-block in the site registry, with its node count and the WORST state of any
-node in it, so an alarm is never hidden by zooming out) and individual nodes
-when zoomed in. Network counts never depend on what the map draws.
+The map itself decides what to draw from "nodes" (see console.js): zoomed
+out, only gateways, the centre and every node in ALARM; from
+console.map.node_detail_zoom in, every node, nearby ones grouped. Network
+counts never depend on what the map draws. "map_blocks" (one aggregate per
+registry block, with the WORST state of its nodes) is still returned but the
+console no longer draws it.
 
 Operators see site labels; each node still carries its dev_eui for the node
 detail page. Every node and gateway count comes from the database. The site
@@ -296,7 +298,8 @@ def _node_map_state(n: dict[str, Any]) -> str:
 
 def _map_blocks(shapes: dict[str, dict[str, Any]], node_list: list[dict[str, Any]],
                 never_seen: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One aggregate per registry block, worst state first:
+    """One aggregate per registry block, worst state first (API only: the
+    console's map does not draw these):
     {"block", "state", "nodes", "reporting", "missing", "never_seen", "in_alarm",
      "on_watch", "warming_up", "alerting": [labels on WATCH/ALARM], "centre", "area"}"""
     rank = {s: i for i, s in enumerate(BLOCK_STATE_ORDER)}

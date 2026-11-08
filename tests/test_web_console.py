@@ -113,7 +113,6 @@ def test_console_page_works_offline(client):
     for path in ["/static/vendor/leaflet/leaflet.js", "/static/vendor/leaflet/leaflet.css",
                  "/static/vendor/markercluster/leaflet.markercluster.js",
                  "/static/vendor/markercluster/MarkerCluster.css",
-                 "/static/vendor/markercluster/MarkerCluster.Default.css",
                  "/static/console.js", "/static/console.css"]:
         assert client.get(path).status_code == 200, path
 

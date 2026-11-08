@@ -77,11 +77,18 @@ class MqttConfig(_Strict):
     uplink_topic: str
     qos: int = Field(ge=0, le=2)
     keepalive_seconds: int = Field(gt=0)
+    # Fixed MQTT client id of the detection service. With it the broker keeps
+    # the service's session (and queues uplinks) while the service is down.
+    # One detection service per broker: two with the same id knock each other off.
+    service_client_id: str = Field(min_length=1, max_length=23)
 
 
 class DatabaseConfig(_Strict):
     url: str
     web_url: str
+    # Database writes the detection service can hold while the database is
+    # down. Past this, the oldest reading writes are dropped (never events).
+    max_queued_writes: int = Field(ge=100)
 
 
 class SimNoise(_Strict):
@@ -136,7 +143,10 @@ class SimFirmware(_Strict):
 
     sample_seconds: float = Field(gt=0)
     local_trigger: LocalTrigger
-    alarm_interval_minutes: float = Field(gt=0)
+    # Alarm mode has two rates: while the local trigger holds, and (slower)
+    # after it clears, until alarm_hold_minutes have passed.
+    interval_while_triggered_seconds: float = Field(gt=0)
+    interval_after_trigger_minutes: float = Field(gt=0)
     alarm_hold_minutes: float = Field(ge=0)
     duty_cycle: float = Field(gt=0, le=1)
 
@@ -436,7 +446,8 @@ def apply_speedup(cfg: Config) -> Config:
                 "ramp_minutes": s.smoke.ramp_minutes / k, "hold_minutes": s.smoke.hold_minutes / k}),
             "firmware": fw.model_copy(update={
                 "sample_seconds": fw.sample_seconds / k,
-                "alarm_interval_minutes": fw.alarm_interval_minutes / k,
+                "interval_while_triggered_seconds": fw.interval_while_triggered_seconds / k,
+                "interval_after_trigger_minutes": fw.interval_after_trigger_minutes / k,
                 "alarm_hold_minutes": fw.alarm_hold_minutes / k,
                 "local_trigger": fw.local_trigger.model_copy(update={
                     "baseline_half_life_minutes": fw.local_trigger.baseline_half_life_minutes / k}),
@@ -476,7 +487,9 @@ def summary(cfg: Config) -> str:
         f"demo speed-up       x{t.demo_speedup:g}" + ("  (real time)" if t.demo_speedup == 1 else
                                                      "  (DEMO: durations divided)"),
         f"heartbeat           every {_duration(t.heartbeat_minutes)}",
-        f"node alarm mode     every {_duration(cfg.simulator.firmware.alarm_interval_minutes)} "
+        f"node alarm mode     every {_duration(cfg.simulator.firmware.interval_while_triggered_seconds / 60)} "
+        f"while triggered, then every {_duration(cfg.simulator.firmware.interval_after_trigger_minutes)} "
+        f"for {_duration(cfg.simulator.firmware.alarm_hold_minutes)} "
         f"(simulated firmware; duty cycle permitting)",
         f"node MISSING after  {_duration(t.missing_after_minutes)} "
         f"({t.missed_heartbeats_for_missing} missed heartbeats)",

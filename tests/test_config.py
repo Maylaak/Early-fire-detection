@@ -75,6 +75,9 @@ def test_speedup_divides_durations_not_sample_counts():
     assert fast.detection.baseline_half_life_minutes.gas == pytest.approx(2)
     assert fast.detection.notify_cooldown_minutes == pytest.approx(0.5)
     assert fast.simulator.smoke.ramp_minutes == pytest.approx(real.simulator.smoke.ramp_minutes / 60)
+    fw, fast_fw = real.simulator.firmware, fast.simulator.firmware
+    assert fast_fw.interval_while_triggered_seconds == pytest.approx(fw.interval_while_triggered_seconds / 60)
+    assert fast_fw.interval_after_trigger_minutes == pytest.approx(fw.interval_after_trigger_minutes / 60)
     # Counts and thresholds are untouched: warm-up stays 30 readings.
     assert fast.detection.warmup_samples == real.detection.warmup_samples == 30
     assert fast.detection.confirm_samples == real.detection.confirm_samples

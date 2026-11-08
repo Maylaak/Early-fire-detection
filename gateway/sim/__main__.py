@@ -6,7 +6,8 @@
 "run" reads every node's simulated sensor every simulator.firmware.sample_seconds
 and publishes a ChirpStack v4 uplink when the PLACEHOLDER firmware would
 transmit: a heartbeat every timing.heartbeat_minutes, or at once and then
-every minute while the node's local gas trigger holds (duty cycle permitting).
+every minute while the node's local gas trigger holds and for a
+while after (duty cycle permitting; simulator.firmware in config.yaml).
 See gateway/sim/firmware.py.
 "inject" tells an already-running simulator (via MQTT) to start a smoke
 event on NODE (a node name like node-2, or its dev_eui).
@@ -143,6 +144,14 @@ def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
     log.info("simulating %d nodes: heartbeat every %gs, sensor read every %gs%s. Ctrl+C to stop.",
              len(nodes), heartbeat_min * 60, interval,
              " (dry run, printing only)" if args.dry_run else "")
+    for name, fw in nodes.items():
+        limited = fw.duty_cycle_limited()
+        if limited:
+            log.info("%s is at SF%d: the duty cycle allows one uplink per %.0fs, so it sends %s",
+                     name, fw.model.spreading_factor, fw.min_gap.total_seconds(), ", ".join(
+                         f"{rate} every {every.total_seconds():g}s (configured "
+                         f"{fw.configured_rates()[rate].total_seconds():g}s)"
+                         for rate, every in limited.items()))
     next_tick = time.monotonic()
     sent = 0
     try:
