@@ -190,6 +190,9 @@ class LorawanConfig(_Strict):
 
 
 class SimulatorConfig(_Strict):
+    reporting_mode: Literal["legacy", "event_driven"] = "legacy"
+    state_path: str = "data/simulator-state.sqlite"
+
     application_id: str
     application_name: str
     gateway_id: str
@@ -234,6 +237,14 @@ class HalfLives(_Strict):
 
 
 class DetectionConfig(_Strict):
+    # Explicit control protocol uses real daily heartbeats; legacy demo timing is unchanged.
+    explicit_heartbeat_minutes: float = Field(default=1440, gt=0)
+    explicit_missed_heartbeats: int = Field(default=3, ge=1)
+
+    @property
+    def explicit_missing_minutes(self) -> float:
+        return self.explicit_heartbeat_minutes * self.explicit_missed_heartbeats
+
     baseline_half_life_minutes: HalfLives
     warmup_samples: int = Field(ge=1)
     replay_hours_on_startup: float = Field(ge=0)
@@ -305,12 +316,38 @@ class SiteGateway(_Located):
 
 class SiteCentre(_Located):
     label: str = Field(min_length=1)
+    entity_id: str = "MCU-01"
+    role: str = "Main Control Unit"
+    status: Literal["planned"] = "planned"
+    provisional: Literal[True] = True
+
+
+class SiteDrone(_Located):
+    entity_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    status: Literal["planned"] = "planned"
+    provisional: Literal[True] = True
+
+
+class DemoOffset(_Strict):
+    east_m: float = Field(ge=-10000, le=10000)
+    north_m: float = Field(ge=-10000, le=10000)
+
+
+class DemoLayout(_Strict):
+    centre: _Located
+    gateway_distance_m: float = Field(ge=0, le=10000)
+    gateway_bearing_deg: float = Field(ge=0, lt=360)
+    drone: DemoOffset
+    control_unit: DemoOffset
+
 
 
 class SitesConfig(_Strict):
     nodes: list[SiteNode]
     gateways: list[SiteGateway]
     centre: SiteCentre
+    drone: SiteDrone | None = None
 
     @model_validator(mode="after")
     def _unique_ids(self) -> SitesConfig:
@@ -331,21 +368,24 @@ class SitesConfig(_Strict):
 # --- operator console ------------------------------------------------------
 
 class TileLayer(_Strict):
+    max_native_zoom: int | None = Field(default=None, ge=1, le=22)
     url: str
     attribution: str
     max_zoom: int = Field(ge=1, le=22)
 
 
 class MapConfig(_Strict):
+    show_nodes_in_overview: bool = False
+
     centre_lat: float = Field(ge=-90, le=90)
     centre_lon: float = Field(ge=-180, le=180)
     zoom: int = Field(ge=1, le=20)
-    # Below this zoom the map shows gateways, the centre and nodes in ALARM
-    # only; every (clustered) node marker appears at this zoom and closer.
+    # Legacy detail/clustering threshold. Demo mode uses at least zoom 18
+    # (capped by tile limits), with individual nodes and an overview summary.
     node_detail_zoom: int = Field(ge=2, le=22)
     # Nearby node markers closer than this (screen pixels) share one badge.
     cluster_radius_px: int = Field(ge=10, le=200)
-    # Radius drawn around each node in ALARM: sensor coverage, NOT fire extent.
+    # Sensor coverage radius, NOT fire extent or the demo alarm-highlight radius.
     alarm_zone_radius_m: float = Field(gt=0)
     primary_tiles: TileLayer
     fallback_tiles: TileLayer
@@ -375,6 +415,14 @@ class ConsoleConfig(_Strict):
 
 
 class Config(_Strict):
+    demo_layout: DemoLayout | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_layout(cls, raw):
+        return _apply_demo_layout(raw) if isinstance(raw, dict) else raw
+
+
     mqtt: MqttConfig
     database: DatabaseConfig
     timing: TimingConfig
@@ -440,6 +488,7 @@ def apply_speedup(cfg: Config) -> Config:
             "max_baseline_freeze_minutes": d.max_baseline_freeze_minutes / k,
             "notify_cooldown_minutes": d.notify_cooldown_minutes / k,
             "offline_after_minutes": d.offline_after_minutes / k,
+            "explicit_heartbeat_minutes": d.explicit_heartbeat_minutes / k,
         }),
         "simulator": s.model_copy(update={
             "smoke": s.smoke.model_copy(update={
@@ -455,6 +504,40 @@ def apply_speedup(cfg: Config) -> Config:
         }),
         "web": cfg.web.model_copy(update={"chart_hours": cfg.web.chart_hours / k}),
     })
+
+
+def _apply_demo_layout(raw: dict[str, Any]) -> dict[str, Any]:
+    """Resolve demo positions once; legacy explicit-coordinate configs still work.
+
+    Sort by stable devEUI so YAML ordering cannot move existing identities.
+    All registry positions are generated, never copied from frontend constants.
+    """
+    if raw.get("demo_layout") is None:
+        return raw
+    from gateway.geometry import destination, grid_positions, offset_position
+
+    layout = DemoLayout.model_validate(raw["demo_layout"])
+    sites = raw["sites"]
+    nodes = sites["nodes"]
+    ids = [_hex(n["dev_eui"], 16, "dev_eui") for n in nodes]
+    _unique(ids, "site node dev_eui")
+    if len(nodes) != 9 or len(sites["gateways"]) != 1:
+        raise ValueError("demo_layout requires exactly nine nodes and one gateway")
+    sim_ids = {n["dev_eui"].lower() for n in raw["simulator"]["nodes"]}
+    if set(ids) != sim_ids:
+        raise ValueError("demo_layout site and simulator node identities must match")
+    if sites["gateways"][0]["gateway_id"].lower() != raw["simulator"]["gateway_id"].lower():
+        raise ValueError("demo_layout gateway must match simulator gateway identity")
+    lat, lon = layout.centre.lat, layout.centre.lon
+    for node, position in zip(sorted(nodes, key=lambda n: n["dev_eui"].lower()), grid_positions(lat, lon)):
+        if "lat" in node or "lon" in node:
+            _Located.model_validate({k: node[k] for k in ("lat", "lon") if k in node})
+        node.update(position)
+    sites["gateways"][0].update(destination(lat, lon, layout.gateway_distance_m, layout.gateway_bearing_deg))
+    for key, offset in (("drone", layout.drone), ("centre", layout.control_unit)):
+        sites[key].update(offset_position(lat, lon, offset.east_m, offset.north_m))
+    raw["console"]["map"].update(centre_lat=lat, centre_lon=lon)
+    return raw
 
 
 def load_config(path: str | Path | None = None, env: dict[str, str] | None = None) -> Config:
@@ -504,6 +587,13 @@ def summary(cfg: Config) -> str:
         f"sites               {len(cfg.sites.nodes)} nodes, {len(cfg.sites.gateways)} gateways, "
         f"centre: {cfg.sites.centre.label}",
     ]
+    if cfg.simulator.reporting_mode == "event_driven":
+        lines[1:5] = [
+            f"heartbeat           every {_duration(d.explicit_heartbeat_minutes)} (event-driven)",
+            "fire alerts         one per local ALARM episode; no routine telemetry",
+            f"node MISSING after  {_duration(d.explicit_missing_minutes)} ({d.explicit_missed_heartbeats} intervals)",
+            f"local sampling      every {cfg.simulator.firmware.sample_seconds:g} s; warm-up {d.warmup_samples} samples",
+        ]
     blocks: dict[str, list[str]] = {}
     for n in cfg.sites.nodes:
         blocks.setdefault(n.block, []).append(n.label)
@@ -514,8 +604,14 @@ def summary(cfg: Config) -> str:
     if sim_euis - site_euis:
         lines.append(f"  WARNING: simulator nodes without a site entry: {sorted(sim_euis - site_euis)}")
     m, f = cfg.console.map, cfg.console.features
-    lines += ["", f"map detail          below zoom {m.node_detail_zoom} (default view {m.zoom}) only "
-              f"ALARM nodes; all nodes from {m.node_detail_zoom}, clustered within {m.cluster_radius_px} px",
+    if cfg.demo_layout:
+        detail = min(max(m.node_detail_zoom, 18), m.primary_tiles.max_zoom, m.fallback_tiles.max_zoom)
+        map_description = (f"map detail          demo grid: individual nodes from zoom {detail}; "
+                           "overview: network summary and active alarms")
+    else:
+        map_description = (f"map detail          below zoom {m.node_detail_zoom} (default view {m.zoom}) only "
+                           f"ALARM nodes; all nodes from {m.node_detail_zoom}, clustered within {m.cluster_radius_px} px")
+    lines += ["", map_description,
               "phase-2 panels      " + ", ".join(
         f"{name} {'ON' if on else 'off'}" for name, on in
         (("thermal camera", f.thermal_camera), ("drone", f.drone), ("wind station", f.wind_station)))]

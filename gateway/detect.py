@@ -106,6 +106,10 @@ class NodeDetector:
         self.samples = 0
         self.last_time: datetime | None = None
         self.online = True
+        self.last_contact: datetime | None = None
+        self.last_message_type: str | None = None
+        self.explicit_fire_active = False
+        self.last_manual_clear: datetime | None = None
         self._temp = self._hum = self._log_gas = 0.0
         self._up = self._down = 0
         self._frozen_since: datetime | None = None
@@ -118,7 +122,57 @@ class NodeDetector:
             return None
         return Baseline(self._temp, self._hum, math.exp(self._log_gas))
 
+    def contact(self, t: datetime, kind: str) -> None:
+        if self.last_contact is None or t > self.last_contact:
+            self.last_contact, self.last_message_type = t, kind
+            self.online = True
+
+    def control(self, t: datetime, kind: str) -> Event | None:
+        self.contact(t, kind)
+        if kind == 'FIRE_ALERT' and self.last_manual_clear is not None and t <= self.last_manual_clear:
+            return None  # Delayed pre-clear alert: receipt is stored, alarm is not resurrected.
+        if kind != "FIRE_ALERT":
+            if self.samples == 0 and self.state == WARMUP:
+                self.state, self.state_since = NORMAL, t
+            return None
+        first = not self.explicit_fire_active
+        old = self.state
+        self.explicit_fire_active = True
+        self.state = ALARM
+        if first:
+            self.state_since = t
+        return self._event(t, KIND_STATE, f"{self.name}: explicit FIRE ALERT from node",
+                           notify=first, from_state=old, to_state=ALARM,
+                           details={"message_type": kind, "source": "node"})
+
+    def manual_clear(self, t: datetime) -> Event | None:
+        """Operator decision only: preserve contact, baselines and sensor sampling.
+
+        The service invokes this on its live detector only after durable commit.
+        A later actual alert/measurement can alarm again; no uplink is invented.
+        """
+        if self.state != ALARM:
+            return None
+        self.explicit_fire_active = False
+        self.last_manual_clear = t
+        self.state, self.state_since = NORMAL, t
+        self._up = self._down = 0
+        self._episode_notified = False
+        self._last_notified = {}
+        return self._event(t, 'MANUAL_CLEAR', f'{self.name}: fire alarm manually cleared by authorized operator',
+                           notify=False, from_state=ALARM, to_state=NORMAL,
+                           details={'action': 'manual_clear', 'operator': 'admin_token'})
+
     def process(self, t: datetime, r: SensorReading) -> Evaluation:
+        if self.last_manual_clear is not None and t <= self.last_manual_clear:
+            return Evaluation(self.state, evaluated=False)
+        was_online = self.online
+        self.contact(t, "MEASUREMENT")
+        self.online = was_online
+        if self.explicit_fire_active:
+            if self.last_contact == t:
+                self.online = True
+            return Evaluation(ALARM, evaluated=False)
         if self.last_time is not None and t <= self.last_time:
             return Evaluation(self.state, evaluated=False)  # late or out of order: skip
         events: list[Event] = []
@@ -131,6 +185,7 @@ class NodeDetector:
         log_gas = math.log(max(r.gas_resistance_ohm, 1.0))
 
         if self.samples == 0:
+            self.state = WARMUP
             self.state_since = t
             self._update_baseline(dt_min, r, log_gas)
             return Evaluation(self.state, evaluated=False, events=tuple(events))
@@ -167,10 +222,13 @@ class NodeDetector:
         return Evaluation(self.state, True, level, before, dev, tuple(events))
 
     def check_offline(self, now: datetime) -> Event | None:
-        if not self.online or self.last_time is None:
+        last = self.last_contact or self.last_time
+        if not self.online or last is None:
             return None
-        silent = now - self.last_time
-        if silent <= timedelta(minutes=self.cfg.offline_after_minutes):
+        silent = now - last
+        minutes = (self.cfg.explicit_missing_minutes if self.last_message_type in ("HEARTBEAT", "FIRE_ALERT")
+                   else self.cfg.offline_after_minutes)
+        if silent <= timedelta(minutes=minutes):
             return None
         self.online = False
         secs = silent.total_seconds()
@@ -257,6 +315,7 @@ class DetectionEngine:
     def __init__(self, cfg: DetectionConfig):
         self.cfg = cfg
         self.nodes: dict[str, NodeDetector] = {}
+        self.control_keys: set[str] = set()
 
     def node(self, dev_eui: str, name: str) -> NodeDetector:
         d = self.nodes.get(dev_eui)

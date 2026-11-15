@@ -36,7 +36,7 @@ def test_console_config(client):
     assert c["map"]["centre_lat"] == pytest.approx(33.5530)
     assert c["features"] == {"thermal_camera": False, "drone": False, "wind_station": False}
     assert c["positions_are_placeholders"] is True
-    assert [n["label"] for n in c["sites"]["nodes"]] == ["F-07-01", "F-07-02", "F-07-03", "F-08-01"]
+    assert [n["label"] for n in c["sites"]["nodes"]] == ["F-07-01", "F-07-02", "F-07-03", "F-08-01", "F-08-02", "F-08-03", "F-09-01", "F-09-02", "F-09-03"]
     assert c["missing_after_minutes"] == 30
 
 
@@ -51,7 +51,7 @@ def test_status_during_alarm(client):
     assert n3["block"] == "F-07" and n3["lat"] is not None
     assert n3["signals"] == ["VOC up", "temperature up", "humidity down"]
     assert by_label["F-07-02"]["signals"] == []
-    assert {n["label"] for n in s["never_seen"]} == {"F-07-01", "F-08-01"}
+    assert {n["label"] for n in s["never_seen"]} == {"F-07-01", "F-08-01", "F-08-02", "F-08-03", "F-09-01", "F-09-02", "F-09-03"}
 
     net = s["network"]
     assert (net["total_nodes"], net["reporting"], net["missing"], net["in_alarm"]) == (2, 2, 0, 1)
@@ -262,12 +262,12 @@ def test_config_has_map_detail_settings(client):
 def test_map_blocks_take_the_worst_state(client):
     s = client.get("/api/console/status").json()
     blocks = {b["block"]: b for b in s["map_blocks"]}
-    assert list(blocks) == ["F-07", "F-08"]  # worst first
+    assert list(blocks) == ["F-07", "F-08", "F-09"]  # worst first
     f07 = blocks["F-07"]
     assert f07["state"] == "ALARM" and f07["in_alarm"] == 1 and f07["alerting"] == ["F-07-03"]
     # Holds three registered nodes: two reporting, F-07-01 never heard from.
     assert (f07["nodes"], f07["reporting"], f07["never_seen"]) == (3, 2, 1)
-    assert blocks["F-08"]["state"] == "NO_DATA" and blocks["F-08"]["nodes"] == 1
+    assert blocks["F-08"]["state"] == "NO_DATA" and blocks["F-08"]["nodes"] == 3
     # The block marker sits inside its area, and the area covers its nodes.
     lats = [p[0] for p in f07["area"]]
     assert min(lats) < f07["centre"][0] < max(lats)
@@ -277,7 +277,7 @@ def test_map_blocks_take_the_worst_state(client):
 def test_network_count_is_the_database_not_the_map(client):
     s = client.get("/api/console/status").json()
     assert s["network"]["total_nodes"] == 2  # nodes in the database
-    assert sum(b["nodes"] for b in s["map_blocks"]) == 4  # what the registry places on the map
+    assert sum(b["nodes"] for b in s["map_blocks"]) == 9  # what the registry places on the map
 
 
 def test_block_alarm_survives_silence(engine):

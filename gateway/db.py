@@ -73,6 +73,8 @@ nodes = Table(
     Column("first_seen", UTCDateTime, nullable=False),
     Column("last_seen", UTCDateTime, nullable=False),
     Column("last_f_cnt", Integer),
+    Column("last_message_type", String(16)),
+    Column("explicit_fire_active", Boolean),
     Column("last_rssi", Integer),
     Column("last_snr", Float),
     Column("battery_v", Float),
@@ -134,6 +136,7 @@ gateways = Table(
     "gateways",
     metadata,
     Column("gateway_id", String(16), primary_key=True),
+    Column("last_message_type", String(16)),
     Column("first_seen", UTCDateTime, nullable=False),
     Column("last_seen", UTCDateTime, nullable=False),
     Column("last_rssi", Integer),
@@ -213,3 +216,16 @@ def _add_missing_columns(engine: Engine) -> None:
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+control_uplinks = Table(
+    "control_uplinks", metadata,
+    Column("uplink_key", String(128), primary_key=True),
+    Column("dev_eui", String(16), ForeignKey("nodes.dev_eui"), nullable=False),
+    Column("time", UTCDateTime, nullable=False),
+    Column("received_at", UTCDateTime, nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("f_cnt", Integer, nullable=False),
+    Column("f_port", Integer, nullable=False),
+    Column("event_id", BigId, ForeignKey("events.id")),
+)
