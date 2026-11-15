@@ -222,3 +222,53 @@ table.nodes tr.WATCH td:first-child { box-shadow: inset 3px 0 var(--watch); }
   .stat b { font-size: 22px; }
   table.nodes th:nth-child(n+4), table.nodes td:nth-child(n+4) { display: none; }
 }
+
+/* Planned physical components, distinct from live sensor state markers. */
+.control-icon, .drone-icon {
+  width: 28px; height: 28px; border: 2px dashed #fff; text-align: center;
+  color: #fff; box-shadow: 0 1px 4px #0008;
+}
+.control-icon { background: #72529b; border-radius: 3px; font: 800 9px/24px system-ui; }
+.drone-icon { background: #246d89; border-radius: 50%; font: 800 26px/24px system-ui; }
+
+/* Zoom-aware network view. Lines indicate layout, never radio measurements. */
+.grid-connection { pointer-events: none; }
+.network-anchor { background: transparent; border: 0; }
+.network-summary { display: flex; gap: 10px; padding: 10px 12px; border: 1px solid #6897a8;
+  border-radius: 12px; color: #dceaf2; background: #101e2ef2; box-shadow: 0 5px 18px #0005;
+  min-width: 220px; cursor: pointer; transition: border-color .2s, background .2s; }
+.network-summary:hover { background: #1b3145; border-color: #b7e6ed; }
+.network-summary strong { display: block; font-size: 12px; white-space: nowrap; }
+.network-summary small { display: block; font-size: 11px; margin: 3px 0; }
+.network-summary em { color: #9ebacb; font-size: 10px; font-style: normal; }
+.network-glyph { font-size: 29px; line-height: 1.2; color: #9ccbd3; }
+.network-summary.ALARM { border: 2px solid var(--alarm); background: #481f29f5; }
+.network-summary.WATCH { border-color: var(--watch); }
+.network-summary.MISSING { border-style: dashed; }
+.asset-label { background: #101e2ee8; color: #e4edf5; border: 1px solid #60758b; font-size: 10px; }
+.control-icon svg, .gateway-asset svg { width: 100%; height: 100%; fill: none; stroke: #eef8ff; stroke-width: 1.7; }
+.gateway-asset { width: 30px; height: 30px; border: 2px solid #c8dfeb; border-radius: 7px; background: #254c63; }
+.gateway-asset.offline { background: #424957; border-style: dashed; }
+.network-detail .node-pin span { left: 0; top: 12px; transform: translateX(-50%); font-size: 10px; }
+.network-detail .node-pin { animation: network-arrive 220ms ease-out both; animation-delay: var(--node-delay, 0ms); }
+@keyframes network-arrive { from { opacity: 0; filter: blur(1px); } to { opacity: 1; filter: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .network-detail .node-pin, .network-summary, .cluster-badge.ALARM, .node-pin.ALARM i { animation: none !important; transition: none !important; }
+}
+
+.network-detail .node-pin.ALARM { animation: none; }
+
+/* Detailed alarms use meter-based fills, never an expanding screen-space glow. */
+.network-detail .node-pin.ALARM i { animation: none; box-shadow: none; }
+.cell-alarm-highlight { animation: none; filter: none; pointer-events: none; }
+.coverage-tip { color: #264657; border-color: #79a8bf; }
+
+.clear-alarm { cursor: pointer; margin: 5px 0; padding: 4px 8px; border: 1px solid #b78472; border-radius: 4px; background: #372a29; color: #fff; font: inherit; }
+#clear-dialog { max-width: 480px; width: calc(100% - 32px); box-sizing: border-box; color: var(--text); background: var(--panel, #17212d); border: 1px solid var(--muted); border-radius: 8px; padding: 20px; }
+#clear-dialog::backdrop { background: #0009; }
+#clear-dialog input { display: block; box-sizing: border-box; width: 100%; margin-top: 8px; padding: 8px; }
+#clear-error { color: #ffb69f; min-height: 1.5em; }
+.clear-actions { display: flex; justify-content: flex-end; gap: 12px; }
+.clear-actions button { cursor: pointer; padding: 8px 16px; }
+.clear-actions button:disabled { cursor: wait; opacity: .6; }
+.clear-notice { margin: 0 16px 12px; }

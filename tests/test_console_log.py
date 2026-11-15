@@ -65,7 +65,7 @@ def test_blocks_are_independent():
     tr = clog.BlockTracker(SITES)
     tr.prime(detectors())
     msgs = [e.message for e in tr.update(detectors(F_08_01=ALARM), T0)]
-    assert msgs == ["BLOCK F-08 FIRE ALARM: F-08-01 (1 of 1 nodes)"]
+    assert msgs == ["BLOCK F-08 FIRE ALARM: F-08-01 (1 of 3 nodes)"]
 
 
 def test_primed_alarm_is_not_reannounced_after_restart():
@@ -77,12 +77,12 @@ def test_primed_alarm_is_not_reannounced_after_restart():
 def test_system_check():
     ok = clog.system_check(T0, detectors(), 1, 1)
     assert ok.level == "info"
-    assert ok.message == "System check: 4/4 nodes reporting, 1/1 gateways online, 0 in alarm, 0 on watch"
+    assert ok.message == "System check: 9/9 nodes reporting, 1/1 gateways online, 0 in alarm, 0 on watch"
     ds = detectors(F_07_01=ALARM)
     ds[EUI["F-08-01"]].online = False
     bad = clog.system_check(T0, ds, 0, 1)
     assert bad.level == "warning"
-    assert "3/4 nodes reporting, 0/1 gateways online, 1 in alarm" in bad.message
+    assert "8/9 nodes reporting, 0/1 gateways online, 1 in alarm" in bad.message
 
 
 def test_notification_entries_use_labels_only():

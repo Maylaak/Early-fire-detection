@@ -32,7 +32,8 @@ from fastapi import FastAPI, Query
 from sqlalchemy import Connection, func, select
 
 from gateway.config import Config
-from gateway.db import console_log, gateways, nodes, readings
+from gateway.geometry import grid_boundary
+from gateway.db import console_log, events, gateways, nodes, readings
 
 ALARM, WATCH, WARMUP = "ALARM", "WATCH", "WARMUP"
 PILL_ALARM, PILL_WATCH, PILL_CLEAR, PILL_NO_DATA = "FIRE_ALARM", "WATCH", "ALL_CLEAR", "NO_DATA"
@@ -61,13 +62,23 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
             "heartbeat_minutes": timing.heartbeat_minutes,
             "missing_after_minutes": timing.missing_after_minutes,
             "demo_speedup": timing.demo_speedup,
+            "reporting_mode": cfg.simulator.reporting_mode,
+            "clear_alarm_enabled": app.state.clear_alarm_enabled,
+            "explicit_heartbeat_minutes": det.explicit_heartbeat_minutes,
+            "explicit_missing_minutes": det.explicit_missing_minutes,
             "map": con.map.model_dump(),
             "features": con.features.model_dump(),
             "positions_are_placeholders": True,
+            "demo_layout": ({
+                "square_size_m": 100, "rows": 3, "columns": 3,
+                "boundary": grid_boundary(sites_layout.centre.lat, sites_layout.centre.lon),
+                "provisional": True,
+            } if (sites_layout := cfg.demo_layout) else None),
             "sites": {
                 "nodes": [n.model_dump() for n in sites.nodes],
                 "gateways": [g.model_dump() for g in sites.gateways],
                 "centre": sites.centre.model_dump(),
+                "drone": sites.drone.model_dump() if sites.drone else None,
             },
         }
 
@@ -80,11 +91,15 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
             # per open console). A node's last_seen is the time of its newest
             # reading, so that reading is found by an indexed join, not a
             # query per node.
-            node_rows = conn.execute(select(nodes)).all()
+            alarm_id = select(func.max(events.c.id)).where(
+                events.c.dev_eui == nodes.c.dev_eui, events.c.to_state == ALARM
+            ).correlate(nodes).scalar_subquery()
+            node_rows = conn.execute(select(nodes, alarm_id.label('alarm_event_id'))).all()
             latest = {}
+            latest_times = select(readings.c.dev_eui, func.max(readings.c.time).label("time")).group_by(readings.c.dev_eui).subquery()
             for r in conn.execute(
-                select(readings).join(nodes, (readings.c.dev_eui == nodes.c.dev_eui)
-                                      & (readings.c.time == nodes.c.last_seen))
+                select(readings).join(latest_times, (readings.c.dev_eui == latest_times.c.dev_eui)
+                                      & (readings.c.time == latest_times.c.time))
                 .order_by(readings.c.id)
             ):
                 latest[r.dev_eui] = r  # same-time duplicates: the last stored wins
@@ -193,7 +208,7 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
         # The node says it is in alarm mode by sending on the alarm-mode port
         # (its own sensor saw a change). Never guessed from timing. Only
         # meaningful while it is still transmitting.
-        rapid = (r is not None and r.f_port == alarm_port and not now - n.last_seen > missing_after)
+        rapid = (n.last_message_type not in ("HEARTBEAT", "FIRE_ALERT") and r is not None and r.f_port == alarm_port and not now - n.last_seen > missing_after)
         return {
             "dev_eui": n.dev_eui,
             "label": site.label if site else n.name,
@@ -204,8 +219,13 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
             "state": n.state,
             "state_since": n.state_since,
             "last_seen": n.last_seen,
+            "last_contact": n.last_seen,
+            "last_message_type": n.last_message_type or "MEASUREMENT",
+            "explicit_fire_active": bool(n.explicit_fire_active),
+            "alarm_event_id": n.alarm_event_id if n.state == ALARM else None,
             "seconds_since_seen": max((now - n.last_seen).total_seconds(), 0.0),
-            "missing": now - n.last_seen > missing_after,
+            "missing": now - n.last_seen > (timedelta(minutes=det.explicit_missing_minutes) if n.last_message_type in
+                ("HEARTBEAT", "FIRE_ALERT") else missing_after),
             "rapid_updates": rapid,
             "battery_v": n.battery_v,
             "rssi": n.last_rssi,
@@ -247,7 +267,8 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
                 "lon": site.lon if site else None,
                 "last_seen": r.last_seen if r else None,
                 # A gateway relays every node's heartbeat: silent this long means down.
-                "online": r is not None and now - r.last_seen <= missing_after,
+                "online": r is not None and now - r.last_seen <= (timedelta(minutes=det.explicit_missing_minutes)
+                    if r.last_message_type in ("HEARTBEAT", "FIRE_ALERT") else missing_after),
                 "uplinks": r.uplinks if r else 0,
             })
         return out

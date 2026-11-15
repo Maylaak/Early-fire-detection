@@ -5,14 +5,15 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import time
 
-from sqlalchemy import Connection, Engine, Row, insert, select, update
+from sqlalchemy import Connection, Engine, Row, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from gateway.chirpstack import Uplink
 from gateway.codec import SensorReading
 from gateway.console_log import LogEntry
-from gateway.db import console_log, events, gateways, nodes, readings
+from gateway.db import console_log, events, gateways, nodes, readings, control_uplinks
 from gateway.detect import Evaluation, Event, NodeDetector
 
 
@@ -37,15 +38,77 @@ class NodeState:
     state: str
     state_since: datetime | None
     online: bool
+    explicit_fire_active: bool = False
 
     @classmethod
     def of(cls, d: NodeDetector) -> NodeState:
-        return cls(d.dev_eui, d.state, d.state_since, d.online)
+        return cls(d.dev_eui, d.state, d.state_since, d.online, d.explicit_fire_active)
 
 
 class Store:
     def __init__(self, engine: Engine):
         self.engine = engine
+
+    def control_keys(self) -> set[str]:
+        with self.engine.connect() as conn:
+            return set(conn.execute(select(control_uplinks.c.uplink_key)).scalars())
+
+    def manually_cleared_nodes(self) -> dict[str, datetime]:
+        with self.engine.connect() as conn:
+            return dict(conn.execute(select(events.c.dev_eui, func.max(events.c.time)).where(
+                events.c.kind == 'MANUAL_CLEAR').group_by(events.c.dev_eui)).all())
+
+    def clear_alarm(self, dev_eui, expected_alarm_id, event, block, deadline):
+        """Writer-only atomic compare-and-clear. Old confirmations cannot clear new alerts.
+
+        Repeated requests for an already-cleared event are no-ops. Contact and
+        online status are deliberately untouched; no historical row is removed.
+        """
+        with self.engine.begin() as conn:
+            row = conn.execute(select(nodes).where(nodes.c.dev_eui == dev_eui).with_for_update()).first()
+            if row is None:
+                return 404, {'detail': 'Unknown node'}
+            latest = conn.scalar(select(func.max(events.c.id)).where(
+                events.c.dev_eui == dev_eui, events.c.to_state == 'ALARM'))
+            if latest != expected_alarm_id:
+                return 409, {'detail': 'Alarm changed. Refresh and confirm the current alarm.'}
+            if row.state != 'ALARM':
+                return 200, {'ok': True, 'cleared': False, 'dev_eui': dev_eui, 'state': row.state,
+                             'state_since': row.state_since.isoformat() if row.state_since else None}
+            if time.monotonic() > deadline:
+                return 503, {'detail': 'Clear request expired without confirmation; refresh status.'}
+            if event is None:
+                return 409, {'detail': 'Service and stored state differ; refresh before retrying.'}
+            conn.execute(update(nodes).where(nodes.c.dev_eui == dev_eui).values(
+                state='NORMAL', state_since=event.time, explicit_fire_active=False))
+            event.details['alarm_event_id'] = expected_alarm_id
+            event_id = self._insert_events(conn, [event])[0]
+            conn.execute(insert(console_log).values(time=event.time, level='info', category='node',
+                message=event.message, dev_eui=dev_eui, block=block))
+            return 200, {'ok': True, 'cleared': True, 'dev_eui': dev_eui,
+                         'state': 'NORMAL', 'event_id': event_id}
+
+    def save_control(self, up, kind, received_at, node, event):
+        """Receipt, contact and optional fire event commit together; no sample rows."""
+        with self.engine.begin() as conn:
+            key = uplink_key(up)
+            prior = conn.execute(select(control_uplinks.c.event_id).where(
+                control_uplinks.c.uplink_key == key)).first()
+            if prior is not None:
+                return prior.event_id
+            self._ensure_node(conn, up.dev_eui, up.device_name, up.time)
+            row = conn.execute(select(nodes).where(nodes.c.dev_eui == up.dev_eui)).one()
+            if up.time >= row.last_seen:
+                conn.execute(update(nodes).where(nodes.c.dev_eui == up.dev_eui).values(
+                    last_seen=up.time, last_message_type=kind, last_f_cnt=up.f_cnt,
+                    last_rssi=up.rssi, last_snr=up.snr))
+            self._write_node_state(conn, node)
+            self._upsert_gateways(conn, up, kind)
+            event_id = self._insert_events(conn, [event])[0] if event else None
+            conn.execute(insert(control_uplinks).values(uplink_key=key, dev_eui=up.dev_eui,
+                time=up.time, received_at=received_at, kind=kind, f_cnt=up.f_cnt,
+                f_port=up.f_port, event_id=event_id))
+            return event_id
 
     def save_reading(self, up: Uplink, reading: SensorReading, received_at: datetime,
                      ev: Evaluation, node: NodeState) -> int | None:
@@ -103,6 +166,7 @@ class Store:
             "name": up.device_name,
             "application_name": up.application_name,
             "last_seen": up.time,
+            "last_message_type": "MEASUREMENT",
             "last_f_cnt": up.f_cnt,
             "last_rssi": up.rssi,
             "last_snr": up.snr,
@@ -115,7 +179,7 @@ class Store:
             conn.execute(update(nodes).where(nodes.c.dev_eui == up.dev_eui).values(**latest))
 
     @staticmethod
-    def _upsert_gateways(conn: Connection, up: Uplink) -> None:
+    def _upsert_gateways(conn: Connection, up: Uplink, kind: str = "MEASUREMENT") -> None:
         for gw in up.gateways:
             row = conn.execute(
                 select(gateways.c.last_seen).where(gateways.c.gateway_id == gw.gateway_id)
@@ -123,11 +187,11 @@ class Store:
             if row is None:
                 conn.execute(insert(gateways).values(
                     gateway_id=gw.gateway_id, first_seen=up.time, last_seen=up.time,
-                    last_rssi=gw.rssi, last_snr=gw.snr, uplinks=1))
+                    last_rssi=gw.rssi, last_snr=gw.snr, last_message_type=kind, uplinks=1))
                 continue
             latest = {"uplinks": gateways.c.uplinks + 1}
             if up.time >= row.last_seen:
-                latest.update(last_seen=up.time, last_rssi=gw.rssi, last_snr=gw.snr)
+                latest.update(last_seen=up.time, last_rssi=gw.rssi, last_snr=gw.snr, last_message_type=kind)
             conn.execute(update(gateways).where(gateways.c.gateway_id == gw.gateway_id).values(**latest))
 
     def all_gateways(self) -> list[Row]:
@@ -199,7 +263,8 @@ class Store:
     @staticmethod
     def _write_node_state(conn: Connection, d: NodeDetector | NodeState) -> None:
         conn.execute(update(nodes).where(nodes.c.dev_eui == d.dev_eui).values(
-            state=d.state, state_since=d.state_since, online=d.online))
+            state=d.state, state_since=d.state_since, online=d.online,
+            explicit_fire_active=d.explicit_fire_active))
 
     @staticmethod
     def _insert_events(conn: Connection, evs: Sequence[Event]) -> list[int]:

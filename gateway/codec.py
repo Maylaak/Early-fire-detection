@@ -108,3 +108,23 @@ def decode(payload: bytes) -> SensorReading:
         battery_v=round(batt * BATTERY_STEP_V, 2),
         gas_saturated=gas == UINT24_MAX,
     )
+
+
+@dataclass(frozen=True)
+class ControlMessage:
+    kind: str
+
+
+def encode_control(kind: str) -> bytes:
+    """Version 2: version byte, explicit kind byte. No environmental sample."""
+    if kind not in ("HEARTBEAT", "FIRE_ALERT"):
+        raise CodecError("unknown control message kind")
+    return bytes((2, 1 if kind == "HEARTBEAT" else 2))
+
+
+def decode_message(payload: bytes) -> SensorReading | ControlMessage:
+    if payload[:1] == b"\x02":
+        if len(payload) != 2 or payload[1] not in (1, 2):
+            raise CodecError("invalid version-2 control payload")
+        return ControlMessage("HEARTBEAT" if payload[1] == 1 else "FIRE_ALERT")
+    return decode(payload)

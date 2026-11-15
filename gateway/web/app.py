@@ -2,7 +2,8 @@
 
 The web app only READS the database, through the read-only connection
 (database.web_url: the "webapp_ro" Postgres role, or SQLite opened in
-read-only mode). It never creates tables and has no write endpoints.
+read-only mode). It never creates tables or writes to the database. An optional
+authorized command proxy forwards manual clears to the detection service.
 Detection and alerting run in the separate detection service and do not
 depend on anyone having this page open.
 
@@ -28,6 +29,8 @@ from sqlalchemy import Connection, Engine, and_, select
 from sqlalchemy.exc import DBAPIError
 
 from gateway.config import Config
+from gateway.commands import CommandSettings
+from gateway.web.commands import add_command_routes
 from gateway.db import events, make_engine, nodes, readings, utcnow
 from gateway.web.console import add_console_routes
 
@@ -57,6 +60,9 @@ def create_app(
     engine = engine or make_engine(cfg.database.web_url, read_only=True)
     det = cfg.detection
     app = FastAPI(title="Wildfire gateway", docs_url="/api/docs", redoc_url=None)
+    command_settings = CommandSettings.from_env()
+    app.state.clear_alarm_enabled = bool(command_settings.token)
+    add_command_routes(app, command_settings)
     app.mount("/static", _RevalidatingStatic(directory=STATIC), name="static")
 
     def query(fn: Callable[[Connection], Any]) -> Any:
@@ -134,7 +140,9 @@ def create_app(
                 "latest_data_at": latest,
                 # No data from ANY node: likely the detection service, broker or
                 # gateway is down, not the nodes. Worth shouting about.
-                "stale": latest is None or now - latest > stale_after,
+                "stale": not any(now - n["last_seen"] <= (timedelta(minutes=det.explicit_missing_minutes)
+                    if n["last_message_type"] in ("HEARTBEAT", "FIRE_ALERT") else stale_after)
+                    for n in node_list),
             },
         }
 
@@ -177,7 +185,7 @@ def create_app(
                 .order_by(events.c.time.desc(), events.c.id.desc()).limit(limit))
         if kind == "alarms":
             # Raised (WATCH/ALARM) and cleared (back to NORMAL after one).
-            stmt = stmt.where(events.c.kind == "STATE", events.c.from_state != "WARMUP")
+            stmt = stmt.where(events.c.kind.in_(["STATE", "MANUAL_CLEAR"]), ((events.c.from_state != "WARMUP") | (events.c.to_state == "ALARM")))
         elif kind == "connectivity":
             stmt = stmt.where(events.c.kind.in_(["OFFLINE", "ONLINE"]))
         if dev_eui:
@@ -225,6 +233,9 @@ def _node_json(n, r) -> dict[str, Any]:
         "state_since": n.state_since,
         "online": n.online,
         "last_seen": n.last_seen,
+            "last_contact": n.last_seen,
+            "last_message_type": n.last_message_type or "MEASUREMENT",
+            "explicit_fire_active": bool(n.explicit_fire_active),
         "rssi": n.last_rssi,
         "snr": n.last_snr,
         "battery_v": n.battery_v,

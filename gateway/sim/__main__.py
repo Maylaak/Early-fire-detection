@@ -3,12 +3,10 @@
     python -m gateway.sim run [--interval SECONDS] [--seed N] [--dry-run]
     python -m gateway.sim inject NODE [--hold-minutes M]
 
-"run" reads every node's simulated sensor every simulator.firmware.sample_seconds
-and publishes a ChirpStack v4 uplink when the PLACEHOLDER firmware would
-transmit: a heartbeat every timing.heartbeat_minutes, or at once and then
-every minute while the node's local gas trigger holds and for a
-while after (duty cycle permitting; simulator.firmware in config.yaml).
-See gateway/sim/firmware.py.
+"run" samples locally every simulator.firmware.sample_seconds. In event_driven
+mode it sends a two-byte daily HEARTBEAT and one FIRE_ALERT per local alarm
+episode, subject to duty cycle. Legacy mode retains measurement reporting.
+See gateway/sim/event_firmware.py for persistent scheduling and outbox behavior.
 "inject" tells an already-running simulator (via MQTT) to start a smoke
 event on NODE (a node name like node-2, or its dev_eui).
 
@@ -27,7 +25,8 @@ import time
 from datetime import datetime, timezone
 
 from gateway.chirpstack import build_uplink, uplink_topic
-from gateway.codec import encode
+from gateway.codec import encode, encode_control
+from gateway.sim.event_firmware import EventNodeFirmware
 from gateway.config import Config, SimNode, load_config
 from gateway.mqtt import BrokerUnavailable, connect
 from gateway.sim.firmware import ALARM_MODE, HEARTBEAT, NodeFirmware, Transmission
@@ -58,8 +57,8 @@ def _envelope(cfg: Config, model: NodeModel, s: Sample, reason: str = HEARTBEAT)
         dev_addr=node.dev_addr,
         f_cnt=s.f_cnt,
         # The port tells the gateway which mode the node is in.
-        f_port=ports.alarm_mode_f_port if reason == ALARM_MODE else ports.heartbeat_f_port,
-        payload=encode(s.reading),
+        f_port=ports.alarm_mode_f_port if reason in (ALARM_MODE, "FIRE_ALERT") else ports.heartbeat_f_port,
+        payload=encode_control(reason) if reason in ("HEARTBEAT", "FIRE_ALERT") else encode(s.reading),
         rssi=s.rssi,
         snr=s.snr,
         time=s.time,
@@ -69,6 +68,10 @@ def _envelope(cfg: Config, model: NodeModel, s: Sample, reason: str = HEARTBEAT)
 
 
 def _log_sample(model: NodeModel, tx: Transmission) -> None:
+    if tx.reason in ("HEARTBEAT", "FIRE_ALERT"):
+        log.info("%s fCnt=%d %s payload=2 bytes (no environmental readings)",
+                 model.node.name, tx.sample.f_cnt, tx.reason)
+        return
     s, r = tx.sample, tx.sample.reading
     tags = [tx.reason]
     if s.smoke_level > 0:
@@ -114,6 +117,12 @@ def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
     sim = cfg.simulator
     # Heartbeat from timing (already divided by demo_speedup); --interval overrides.
     heartbeat_min = args.interval / 60 if args.interval is not None else cfg.timing.heartbeat_minutes
+    event_mode = sim.reporting_mode == "event_driven"
+    if event_mode and args.interval is not None:
+        log.error("--interval is only for legacy mode; use DEMO_SPEEDUP for daily heartbeats")
+        return 1
+    if event_mode:
+        heartbeat_min = cfg.detection.explicit_heartbeat_minutes
     seed = args.seed if args.seed is not None else sim.seed
     start = datetime.now(timezone.utc)
     nodes = {
@@ -127,6 +136,9 @@ def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
         )
         for n in sim.nodes
     }
+    if event_mode:
+        nodes = {name: EventNodeFirmware(fw.model, cfg, None if args.dry_run else sim.state_path)
+                 for name, fw in nodes.items()}
     models = {name: fw.model for name, fw in nodes.items()}
     interval = sim.firmware.sample_seconds
 
@@ -154,21 +166,39 @@ def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
                          for rate, every in limited.items()))
     next_tick = time.monotonic()
     sent = 0
+    inflight = []
     try:
         while True:
+            for fw, tx, info in inflight[:]:
+                if info.is_published():
+                    fw.acknowledge(tx)
+                    inflight.remove((fw, tx, info))
             now_m = time.monotonic()
             if now_m >= next_tick:
                 now = datetime.now(timezone.utc)
                 for fw in nodes.values():
                     tx = fw.step(now)
+                    if event_mode and not args.dry_run:
+                        pending = fw.pending_transmissions()
+                        tx = pending[0] if pending else None
+                        if tx and any(owner is fw and item.sample.f_cnt == tx.sample.f_cnt
+                                      for owner, item, _ in inflight):
+                            tx = None  # paho owns retransmission until ACK or process restart
                     if tx is None:
                         continue
                     env = _envelope(cfg, fw.model, tx.sample, tx.reason)
                     if client is None:
                         print(json.dumps(env))
                     else:
-                        client.publish(uplink_topic(sim.application_id, fw.model.node.dev_eui),
-                                       json.dumps(env), qos=cfg.mqtt.qos)
+                        info = client.publish(uplink_topic(sim.application_id, fw.model.node.dev_eui),
+                                              json.dumps(env), qos=1 if event_mode else cfg.mqtt.qos)
+                        if event_mode:
+                            # No blocking wait in the sensor loop. Clear only after broker ACK.
+                            if info.rc == 0:
+                                inflight.append((fw, tx, info))
+                            else:
+                                log.error("publish not accepted; frame remains in outbox. Restart simulator after fixing MQTT.")
+                                return 1
                     _log_sample(fw.model, tx)
                     sent += 1
                 next_tick += interval
