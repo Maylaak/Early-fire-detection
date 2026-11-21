@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from gateway.chirpstack import EnvelopeError, Uplink, parse_uplink
-from gateway.codec import CodecError, SensorReading, decode
+from gateway.codec import CodecError, SensorReading, ControlMessage, decode_message
 from gateway.store import Store, uplink_key
 
 log = logging.getLogger(__name__)
@@ -25,14 +25,14 @@ RECENT_KEYS_PER_NODE = 256  # far more than a redelivery burst after a reconnect
 @dataclass(frozen=True)
 class Accepted:
     uplink: Uplink
-    reading: SensorReading
+    reading: SensorReading | ControlMessage
 
 
 @dataclass(frozen=True)
 class Ingested:
     reading_id: int
     uplink: Uplink
-    reading: SensorReading
+    reading: SensorReading | ControlMessage
 
 
 @dataclass
@@ -54,7 +54,9 @@ class Ingestor:
         broken node must not stop ingestion for the others."""
         try:
             up = parse_uplink(topic, body, received_at)
-            reading = decode(up.data)
+            reading = decode_message(up.data)
+            if isinstance(reading, ControlMessage) and (up.f_cnt < 0 or not 1 <= up.f_port <= 223):
+                raise CodecError("invalid control frame counter or application port")
         except (EnvelopeError, CodecError) as e:
             self.stats.rejected += 1
             log.warning("rejected message on %s: %s", topic, e)
@@ -85,6 +87,8 @@ class Ingestor:
         if got is None:
             return None
         up, r = got.uplink, got.reading
+        if isinstance(r, ControlMessage):
+            raise ValueError("control messages must use Pipeline.on_uplink, not measurement-only handle()")
         reading_id = self.store.save_uplink(up, r, received_at)
         if reading_id is None:  # already in the database (e.g. before a restart)
             self.stats.accepted -= 1

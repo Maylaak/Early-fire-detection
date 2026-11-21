@@ -117,10 +117,14 @@ def test_alarm_history(client):
     assert {e["node"] for e in only_node2["events"]} == {"node-2"}
 
 
-def test_web_app_has_no_write_endpoints():
+def test_web_only_write_endpoint_is_authorized_command_proxy():
     app = create_app(CFG, make_engine("sqlite://"))
-    methods = {m for route in app.routes for m in (getattr(route, "methods", None) or set())}
-    assert methods <= {"GET", "HEAD"}, methods
+    # The sole mutation API is an authorized service-command proxy, not a DB writer.
+    writers = [route.path for route in app.routes if 'POST' in (getattr(route, 'methods', None) or set())]
+    assert writers == ['/api/console/nodes/{dev_eui}/clear-alarm']
+    with TestClient(app) as client:
+        assert client.post('/api/console/nodes/0000000000000001/clear-alarm',
+                           json={'alarm_event_id': 1}).status_code in (401, 503)
 
 
 def test_missing_database_gives_503(tmp_path):
