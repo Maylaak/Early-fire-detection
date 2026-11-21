@@ -28,6 +28,7 @@ TOKEN = 'test_only_token_' + 'x' * 32
 
 @pytest.fixture(autouse=True)
 def no_operator_environment(monkeypatch):
+    monkeypatch.delenv('WILDFIRE_LOCAL_DEMO', raising=False)
     monkeypatch.delenv('WILDFIRE_ADMIN_TOKEN', raising=False)
     monkeypatch.delenv('WILDFIRE_COMMAND_PORT', raising=False)
 

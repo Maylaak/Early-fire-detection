@@ -6,10 +6,19 @@ if not exist ".venv\Scripts\activate.bat" goto venv_error
 call ".venv\Scripts\activate.bat"
 if errorlevel 1 goto venv_error
 set "DEMO_SPEEDUP=60"
+set "WILDFIRE_LOCAL_DEMO=1"
 if not exist ".venv\Scripts\python.exe" goto venv_error
 ".venv\Scripts\python.exe" --version
 if errorlevel 1 goto venv_error
 if /i "%~1"=="--worker" goto worker
+
+rem Prevent MQTT session takeover by a second detection service/simulator.
+powershell -NoProfile -NonInteractive -Command "$p=Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.Name -match '^python' -and $_.CommandLine -match '-m gateway\.(service|web|sim)(\s|$)' }; if($p){exit 1}"
+if errorlevel 1 (
+    echo ERROR: Gateway processes are already running, or the process check failed.
+    echo Stop existing service, web and simulator processes before running this launcher.
+    goto failed
+)
 
 title Wildfire - Docker and launcher
 if not exist "gateway\" goto project_error

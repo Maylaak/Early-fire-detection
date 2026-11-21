@@ -25,6 +25,9 @@ class CommandSettings:
     @classmethod
     def from_env(cls):
         token = os.environ.get('WILDFIRE_ADMIN_TOKEN', '')
+        if not token and os.environ.get('WILDFIRE_LOCAL_DEMO') == '1':
+            from gateway.local_operator import local_operator_token
+            token = local_operator_token()
         if token and not re.fullmatch(r'[A-Za-z0-9_-]{32,256}', token):
             raise ValueError('WILDFIRE_ADMIN_TOKEN must be 32-256 URL-safe characters')
         port = int(os.environ.get('WILDFIRE_COMMAND_PORT', '8766'))
