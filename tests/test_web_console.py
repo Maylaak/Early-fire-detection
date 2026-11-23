@@ -33,10 +33,12 @@ def client(engine):
 def test_console_config(client):
     c = client.get("/api/console/config").json()
     assert c["title"] == "BKASSINE CIVIL DEFENCE CENTRE"
-    assert c["map"]["centre_lat"] == pytest.approx(33.5530)
-    assert c["features"] == {"thermal_camera": False, "drone": False, "wind_station": False}
+    assert c["map"]["centre_lat"] == pytest.approx(33.56117)
+    assert c["features"] == {"thermal_camera": False, "drone": False, "wind_station": False,
+                             "drone_simulation": True}
+    assert c["alert_channels"] == ["console"]
     assert c["positions_are_placeholders"] is True
-    assert [n["label"] for n in c["sites"]["nodes"]] == ["F-07-01", "F-07-02", "F-07-03", "F-08-01"]
+    assert [n["label"] for n in c["sites"]["nodes"]] == ["F-07-01", "F-07-02", "F-07-03", "F-08-01", "F-08-02", "F-08-03", "F-09-01", "F-09-02", "F-09-03"]
     assert c["missing_after_minutes"] == 30
 
 
@@ -51,14 +53,24 @@ def test_status_during_alarm(client):
     assert n3["block"] == "F-07" and n3["lat"] is not None
     assert n3["signals"] == ["VOC up", "temperature up", "humidity down"]
     assert by_label["F-07-02"]["signals"] == []
-    assert {n["label"] for n in s["never_seen"]} == {"F-07-01", "F-08-01"}
+    assert {n["label"] for n in s["never_seen"]} == {"F-07-01", "F-08-01", "F-08-02", "F-08-03", "F-09-01", "F-09-02", "F-09-03"}
 
     net = s["network"]
     assert (net["total_nodes"], net["reporting"], net["missing"], net["in_alarm"]) == (2, 2, 0, 1)
-    assert (net["gateways_online"], net["gateways_total"]) == (1, 1)
-    assert s["gateways"][0]["label"] == "GW-01 ridge"
+    assert (net["gateways_online"], net["gateways_total"], net["gateways_planned"]) == (1, 5, 4)
+    assert s["gateways"][0]["label"] == "GW-01 north-centre"
 
     assert [b["line"] for b in s["blocks"]] == ["Block F-07 - VOC up - temperature up - humidity down"]
+    # The alarm says which cluster and gateway, and which node registered it.
+    assert s["blocks"][0]["gateways"] == ["GW-01 north-centre"]
+    assert s["blocks"][0]["alerting"] == [{"label": "F-07-03", "state": "ALARM"}]
+    assert n3["gateway_label"] == "GW-01 north-centre" and n3["surveyed"] is False
+    assert n3["days_missing"] is None  # only a missing node has days missing
+    gw = s["network_tree"][0]
+    assert gw["state"] == "ALARM" and gw["in_alarm"] == 1
+    clusters = {c["cluster"]: c for c in gw["clusters"]}
+    assert clusters["F-07"]["state"] == "ALARM" and clusters["F-07"]["alerting"] == ["F-07-03"]
+    assert clusters["F-08"]["state"] == "NEVER"
     (zone,) = s["alarm_zones"]
     assert zone["label"] == "Block F-07 sensor coverage" and zone["nodes"] == ["F-07-03"]
     lats = [p[0] for p in zone["polygon"]]
@@ -80,6 +92,15 @@ def test_no_data_when_every_node_is_silent(engine):
     assert all(n["missing"] for n in s["nodes"])
     assert s["network"]["reporting"] == 0
     assert s["network"]["gateways_online"] == 0
+    assert all(n["days_missing"] == 0 for n in s["nodes"])  # 3 hours: under a day
+
+
+def test_days_missing_counts_whole_days_of_silence(engine):
+    populate(engine, minutes=40)  # last reading at about START + 40 min
+    s = app_at(engine, START + timedelta(days=5)).get("/api/console/status").json()
+    assert {n["days_missing"] for n in s["nodes"]} == {4}
+    gw = s["network_tree"][0]
+    assert gw["missing"] == 2 and gw["state"] == "MISSING"
 
 
 def test_some_nodes_missing_is_said_out_loud(engine):
@@ -262,12 +283,12 @@ def test_config_has_map_detail_settings(client):
 def test_map_blocks_take_the_worst_state(client):
     s = client.get("/api/console/status").json()
     blocks = {b["block"]: b for b in s["map_blocks"]}
-    assert list(blocks) == ["F-07", "F-08"]  # worst first
+    assert list(blocks) == ["F-07", "F-08", "F-09"]  # worst first
     f07 = blocks["F-07"]
     assert f07["state"] == "ALARM" and f07["in_alarm"] == 1 and f07["alerting"] == ["F-07-03"]
     # Holds three registered nodes: two reporting, F-07-01 never heard from.
     assert (f07["nodes"], f07["reporting"], f07["never_seen"]) == (3, 2, 1)
-    assert blocks["F-08"]["state"] == "NO_DATA" and blocks["F-08"]["nodes"] == 1
+    assert blocks["F-08"]["state"] == "NO_DATA" and blocks["F-08"]["nodes"] == 3
     # The block marker sits inside its area, and the area covers its nodes.
     lats = [p[0] for p in f07["area"]]
     assert min(lats) < f07["centre"][0] < max(lats)
@@ -277,7 +298,7 @@ def test_map_blocks_take_the_worst_state(client):
 def test_network_count_is_the_database_not_the_map(client):
     s = client.get("/api/console/status").json()
     assert s["network"]["total_nodes"] == 2  # nodes in the database
-    assert sum(b["nodes"] for b in s["map_blocks"]) == 4  # what the registry places on the map
+    assert sum(b["nodes"] for b in s["map_blocks"]) == 9  # what the registry places on the map
 
 
 def test_block_alarm_survives_silence(engine):

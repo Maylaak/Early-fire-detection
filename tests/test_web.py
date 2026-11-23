@@ -56,7 +56,11 @@ def test_pages_are_served(client):
     for path in ["/", "/node/70b3d57ed0000003", "/alarms", "/static/charts.js", "/static/style.css"]:
         r = client.get(path)
         assert r.status_code == 200, path
-    assert "Wildfire gateway" in client.get("/").text
+    # Every page names the centre from config.yaml, not a generic product name.
+    for path in ["/", "/node/70b3d57ed0000003", "/alarms"]:
+        text = client.get(path).text
+        assert CFG.console.title in text, path
+        assert "Wildfire gateway" not in text and "{{" not in text, path
 
 
 def test_status_lists_nodes_and_raises_banner(client):
@@ -117,10 +121,14 @@ def test_alarm_history(client):
     assert {e["node"] for e in only_node2["events"]} == {"node-2"}
 
 
-def test_web_app_has_no_write_endpoints():
+def test_web_only_write_endpoint_is_authorized_command_proxy():
     app = create_app(CFG, make_engine("sqlite://"))
-    methods = {m for route in app.routes for m in (getattr(route, "methods", None) or set())}
-    assert methods <= {"GET", "HEAD"}, methods
+    # The sole mutation API is an authorized service-command proxy, not a DB writer.
+    writers = [route.path for route in app.routes if 'POST' in (getattr(route, 'methods', None) or set())]
+    assert writers == ['/api/console/nodes/{dev_eui}/clear-alarm']
+    with TestClient(app) as client:
+        assert client.post('/api/console/nodes/0000000000000001/clear-alarm',
+                           json={'alarm_event_id': 1}).status_code in (401, 503)
 
 
 def test_missing_database_gives_503(tmp_path):

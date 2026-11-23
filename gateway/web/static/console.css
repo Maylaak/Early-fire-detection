@@ -54,7 +54,7 @@ h2 { margin: 0; font-size: 12px; letter-spacing: .12em; font-weight: 700; color:
 .pill small:empty { display: none; }
 .pill.ALL_CLEAR { background: #1d7a43; }
 .pill.WATCH { background: var(--watch); color: #1a1200; }
-.pill.FIRE_ALARM { background: var(--alarm); animation: pulse 1s ease-in-out infinite; }
+.pill.FIRE_ALARM { background: var(--alarm); animation: pulse 1s ease-in-out infinite; cursor: pointer; }
 .pill.NO_DATA { background: #3a424e; }
 .pill.WARMING_UP { background: #2c4a66; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 8px rgba(229, 50, 43, .35); filter: brightness(1.2); } }
@@ -90,6 +90,9 @@ h2 { margin: 0; font-size: 12px; letter-spacing: .12em; font-weight: 700; color:
 .phase2.enabled { opacity: .8; }
 
 /* --- sound toggle -------------------------------------------------------- */
+#desktop-alerts { margin-left: auto; }
+#desktop-alerts + .sound { margin-left: 0; }
+.sound:disabled { opacity: .6; cursor: not-allowed; }
 .sound {
   margin-left: auto; font: inherit; font-size: 12px; font-weight: 700;
   padding: 5px 10px; border-radius: 6px; cursor: pointer;
@@ -105,12 +108,41 @@ h2 { margin: 0; font-size: 12px; letter-spacing: .12em; font-weight: 700; color:
 .stat span { color: var(--muted); font-size: 12px; }
 .stat.hot { background: var(--alarm); }
 .stat.hot span { color: #fff; }
-.block-line { padding: 6px 10px; border-radius: 6px; margin-bottom: 6px; font-weight: 700; }
+.block-line { display: block; width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer;
+  border: 0; padding: 6px 10px; border-radius: 6px; margin-bottom: 6px; font-weight: 700; }
+.block-line small { display: block; font-weight: 600; font-size: 12px; opacity: .9; }
+.block-line:hover, .block-line:focus-visible { filter: brightness(1.25); }
 .block-line.ALARM { background: rgba(229, 50, 43, .18); color: #ff8f88; border-left: 4px solid var(--alarm); }
 .block-line.WATCH { background: rgba(242, 178, 58, .14); color: var(--watch); border-left: 4px solid var(--watch); }
 
+/* Drill-down: gateways, then clusters, then nodes. */
+#network { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 2px 0 8px; font-size: 13px; color: var(--muted); }
+.crumbs button { font: inherit; background: none; border: 0; padding: 2px 4px; color: var(--gateway); cursor: pointer; border-radius: 4px; }
+.crumbs button[aria-current="page"] { color: var(--text); font-weight: 700; cursor: default; }
+.crumbs button:hover:not([aria-current]) { text-decoration: underline; }
+.net-view { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+.net-card { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; cursor: pointer;
+  font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line);
+  border-left: 4px solid var(--clear); border-radius: 6px; padding: 8px 10px; }
+.net-card:hover, .net-card:focus-visible { border-color: var(--gateway); }
+.net-card.ALARM { border-left-color: var(--alarm); background: rgba(229, 50, 43, .14); }
+.net-card.WATCH { border-left-color: var(--watch); }
+.net-card.MISSING, .net-card.NEVER, .net-card.WARMUP, .net-card.NO_DATA { border-left-color: var(--nodata); }
+.net-main { flex: 1; min-width: 0; }
+.net-main b { display: block; }
+.net-main small { display: block; color: var(--muted); font-size: 12px; }
+.net-main .hot { color: #ff8f88; }
+.net-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--clear); flex: none; }
+.net-card.gw .net-dot { border-radius: 2px; transform: rotate(45deg); background: var(--gateway); }
+.net-card.ALARM .net-dot { background: var(--alarm); }
+.net-card.WATCH .net-dot { background: var(--watch); }
+.net-card.MISSING .net-dot, .net-card.NEVER .net-dot, .net-card.WARMUP .net-dot { background: var(--nodata); }
+.badge.NO_DATA { background: #2b333e; color: var(--muted); }
+table.nodes small.gps { display: block; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+
 /* Hundreds of nodes: the list scrolls inside the panel, alerting nodes first. */
-.node-list { max-height: 32vh; overflow: auto; }
+.node-list { overflow: auto; }
 table.nodes { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.nodes thead th { position: sticky; top: 0; background: var(--panel); }
 table.nodes th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11px; letter-spacing: .05em; padding: 4px 6px; border-bottom: 1px solid var(--line); }
@@ -133,15 +165,6 @@ table.nodes tr.WATCH td:first-child { box-shadow: inset 3px 0 var(--watch); }
   border: 1px solid var(--watch); color: var(--watch); font-size: 10px; font-weight: 800; letter-spacing: .04em;
 }
 
-/* --- event log ----------------------------------------------------------- */
-.log-panel { flex: 1; display: flex; flex-direction: column; min-height: 200px; }
-.log { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; font-size: 13px; font-variant-numeric: tabular-nums; }
-.log li { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding: 3px 4px; border-bottom: 1px solid rgba(255,255,255,.04); }
-.log time { color: var(--muted); white-space: nowrap; }
-.log li.warning { color: var(--watch); }
-.log li.alarm { color: #fff; background: rgba(229, 50, 43, .25); font-weight: 700; }
-.log li.notify { color: var(--muted); }
-.log .empty { color: var(--muted); display: block; padding: 8px; }
 
 /* --- map markers and legend ---------------------------------------------- */
 .gw-icon { width: 14px; height: 14px; background: var(--gateway); border: 2px solid #fff; transform: rotate(45deg); }
@@ -152,6 +175,15 @@ table.nodes tr.WATCH td:first-child { box-shadow: inset 3px 0 var(--watch); }
 .legend { background: rgba(13, 17, 23, .88); color: var(--text); padding: 8px 10px; border-radius: 6px; font-size: 12px; line-height: 1.7; }
 .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; border: 2px solid #fff; }
 .legend i.sq { border-radius: 2px; transform: rotate(45deg); width: 10px; height: 10px; margin: 0 8px 0 2px; }
+.legend i.missing { background: var(--nodata); border-style: dashed; }
+.legend i.gw { border-radius: 3px; width: 12px; height: 12px; background: #254c63; border: 2px solid #c8dfeb; }
+.legend i.gw.planned { background: transparent; border: 2px dashed #8aa4b8; }
+.legend i.reserve { border: 0; border-radius: 0; height: 0; width: 18px; border-top: 2px solid #e8d36a; vertical-align: 3px; }
+.legend i.sector { border: 0; border-radius: 0; height: 0; width: 18px; border-top: 2px dotted #e8d36a; vertical-align: 3px; opacity: .7; }
+.legend i.range { background: rgba(74, 163, 255, .08); border: 1px dashed #4aa3ff; }
+.legend i.mcu { border-radius: 3px; background: #72529b; border: 2px dashed #fff; }
+.legend i.drone { background: #246d89; border: 2px dashed #fff; }
+.legend i.link { border: 0; border-radius: 0; height: 0; width: 18px; border-top: 2px dashed var(--gateway); vertical-align: 3px; }
 .legend i.zone { border-radius: 2px; border: 2px solid var(--alarm); background: rgba(229, 50, 43, .3); }
 .legend i.hollow { background: transparent !important; border-style: dashed; border-color: var(--muted); }
 .legend .note { color: var(--muted); max-width: 190px; }
@@ -206,12 +238,11 @@ table.nodes tr.WATCH td:first-child { box-shadow: inset 3px 0 var(--watch); }
   .col-left, .col-right { display: contents; }
   .map-panel { order: 1; }
   #network { order: 2; }
-  .log-panel { order: 3; }
   .pair { order: 4; }
   #p-thermal { order: 5; }
   .map-panel { min-height: 0; }
   #map { height: 55vh; flex: none; }
-  .log { max-height: 50vh; }
+  .net-view { max-height: 60vh; }
 }
 @media (max-width: 640px) {
   .topbar { grid-template-columns: 1fr; justify-items: start; gap: 8px; padding: 10px 12px; }
@@ -222,3 +253,89 @@ table.nodes tr.WATCH td:first-child { box-shadow: inset 3px 0 var(--watch); }
   .stat b { font-size: 22px; }
   table.nodes th:nth-child(n+4), table.nodes td:nth-child(n+4) { display: none; }
 }
+
+/* Planned physical components, distinct from live sensor state markers. */
+.control-icon, .drone-icon {
+  width: 28px; height: 28px; border: 2px dashed #fff; text-align: center;
+  color: #fff; box-shadow: 0 1px 4px #0008;
+}
+.control-icon { background: #72529b; border-radius: 3px; font: 800 9px/24px system-ui; }
+.drone-icon { background: #246d89; border-radius: 50%; font: 800 26px/24px system-ui; }
+
+/* Zoom-aware network view. Lines indicate layout, never radio measurements. */
+.grid-connection { pointer-events: none; }
+.network-anchor { background: transparent; border: 0; }
+.network-summary { display: flex; gap: 10px; padding: 10px 12px; border: 1px solid #6897a8;
+  border-radius: 12px; color: #dceaf2; background: #101e2ef2; box-shadow: 0 5px 18px #0005;
+  min-width: 220px; cursor: pointer; transition: border-color .2s, background .2s; }
+.network-summary:hover { background: #1b3145; border-color: #b7e6ed; }
+.network-summary strong { display: block; font-size: 12px; white-space: nowrap; }
+.network-summary small { display: block; font-size: 11px; margin: 3px 0; }
+.network-summary em { color: #9ebacb; font-size: 10px; font-style: normal; }
+.network-glyph { font-size: 29px; line-height: 1.2; color: #9ccbd3; }
+.network-summary.ALARM { border: 2px solid var(--alarm); background: #481f29f5; }
+.network-summary.WATCH { border-color: var(--watch); }
+.network-summary.MISSING { border-style: dashed; }
+.asset-label { background: #101e2ee8; color: #e4edf5; border: 1px solid #60758b; font-size: 10px; }
+.control-icon svg, .gateway-asset svg { width: 100%; height: 100%; fill: none; stroke: #eef8ff; stroke-width: 1.7; }
+.gateway-asset { width: 30px; height: 30px; border: 2px solid #c8dfeb; border-radius: 7px; background: #254c63; }
+.gateway-asset.offline { background: #424957; border-style: dashed; }
+.gateway-asset.planned { background: #2a333f; border: 2px dashed #8aa4b8; opacity: .85; }
+
+/* Leaflet's layer-switch icon image is not bundled: draw it with text. */
+.leaflet-control-layers-toggle { background-image: none !important; width: auto !important; height: 30px !important;
+  padding: 0 8px; line-height: 30px; font-size: 12px; font-weight: 700; color: #1a2330; text-decoration: none; }
+.leaflet-control-layers-toggle::after { content: "Layers"; }
+
+/* Simulated drone: always labelled, never mistaken for live data. */
+.phase2.sim { opacity: 1; }
+.phase2.sim .phase2-body { flex-direction: column; gap: 4px; letter-spacing: .02em; font-weight: 600; color: var(--text);
+  background: repeating-linear-gradient(135deg, transparent 0 10px, rgba(36,109,137,.12) 10px 20px); }
+.phase2.sim.active .phase2-body { border-color: var(--alarm); }
+.phase2.sim small { color: var(--muted); font-weight: 600; }
+.sim-tag { font-size: 10px; font-weight: 800; letter-spacing: .12em; color: #1a1200; background: var(--watch); padding: 1px 6px; border-radius: 3px; }
+.drone-flying { width: 34px; height: 34px; border-radius: 50%; background: #246d89; border: 2px solid #fff;
+  color: #fff; font: 800 24px/30px system-ui; text-align: center; box-shadow: 0 0 0 4px rgba(229,50,43,.45); }
+.network-detail .node-pin span { left: 0; top: 12px; transform: translateX(-50%); font-size: 10px; }
+.network-detail .node-pin { animation: network-arrive 220ms ease-out both; animation-delay: var(--node-delay, 0ms); }
+@keyframes network-arrive { from { opacity: 0; filter: blur(1px); } to { opacity: 1; filter: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .network-detail .node-pin, .network-summary, .cluster-badge.ALARM, .node-pin.ALARM i { animation: none !important; transition: none !important; }
+}
+
+.network-detail .node-pin.ALARM { animation: none; }
+
+/* Detailed alarms use meter-based fills, never an expanding screen-space glow. */
+.network-detail .node-pin.ALARM i { animation: none; box-shadow: none; }
+.cell-alarm-highlight { animation: none; filter: none; pointer-events: none; }
+.cluster-link { pointer-events: none; }
+/* Map drill-down: clickable cluster chips and the breadcrumb. */
+.cluster-chip { position: absolute; right: 14px; top: 0; transform: translateY(-50%); display: flex; flex-direction: column;
+  align-items: flex-start; gap: 1px; white-space: nowrap; cursor: pointer; font: inherit; text-align: left;
+  background: #101e2ef0; color: #cfe6ec; border: 1px solid #4aa3ff; border-radius: 4px; padding: 2px 7px; }
+.cluster-chip b { font-size: 11px; }
+.cluster-chip small { font-size: 9.5px; color: #9fb4c4; }
+.cluster-chip:hover, .cluster-chip:focus-visible { background: #17314a; outline: none; }
+.cluster-chip.ALARM { border-color: var(--alarm); box-shadow: 0 0 0 2px rgba(229,50,43,.45); }
+.cluster-chip.ALARM small { color: #ff9c95; font-weight: 700; }
+.cluster-chip.MISSING small { color: #c9b98a; }
+.cluster-chip.selected { border-color: #ffe36e; border-width: 2px; }
+.map-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; max-width: 60vw; padding: 4px 6px;
+  background: #101e2ef0; border: 1px solid #60758b; border-radius: 4px; color: #9fb4c4; font-size: 12px; }
+.map-crumbs[hidden] { display: none; }
+.map-crumbs button { font: inherit; color: #cfe6ec; background: none; border: 0; padding: 2px 4px; cursor: pointer; border-radius: 3px; }
+.map-crumbs button:hover { background: #17314a; }
+.map-crumbs button[aria-current="page"] { color: #ffe36e; font-weight: 700; cursor: default; }
+.leaflet-tooltip.cluster-tag { background: #101e2ee8; color: #9ccbd3; border: 1px solid #4aa3ff; font-size: 10px; font-weight: 700; padding: 1px 5px; }
+.leaflet-tooltip-left.cluster-tag::before { border-left-color: #4aa3ff; }
+.coverage-tip { color: #264657; border-color: #79a8bf; }
+
+.clear-alarm { cursor: pointer; margin: 5px 0; padding: 4px 8px; border: 1px solid #b78472; border-radius: 4px; background: #372a29; color: #fff; font: inherit; }
+#clear-dialog { max-width: 480px; width: calc(100% - 32px); box-sizing: border-box; color: var(--text); background: var(--panel, #17212d); border: 1px solid var(--muted); border-radius: 8px; padding: 20px; }
+#clear-dialog::backdrop { background: #0009; }
+#clear-dialog input { display: block; box-sizing: border-box; width: 100%; margin-top: 8px; padding: 8px; }
+#clear-error { color: #ffb69f; min-height: 1.5em; }
+.clear-actions { display: flex; justify-content: flex-end; gap: 12px; }
+.clear-actions button { cursor: pointer; padding: 8px 16px; }
+.clear-actions button:disabled { cursor: wait; opacity: .6; }
+.clear-notice { margin: 0 16px 12px; }

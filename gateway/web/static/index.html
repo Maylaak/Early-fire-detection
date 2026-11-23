@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Operator console - Wildfire gateway</title>
+  <title>Operator console - {{centre_title}}</title>
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
   <link rel="stylesheet" href="/static/vendor/markercluster/MarkerCluster.css">
   <link rel="stylesheet" href="/static/console.css">
@@ -31,6 +31,7 @@
         <div class="panel-head">
           <h2>FOREST MAP</h2>
           <span class="muted" id="map-note"></span>
+          <button type="button" class="sound" id="desktop-alerts" aria-pressed="false">Desktop alerts: OFF</button>
           <button type="button" class="sound" id="sound" aria-pressed="false">Sound: OFF</button>
         </div>
         <!-- What the map is showing, and any alerting node it cannot place.
@@ -59,15 +60,13 @@
         <div class="stats">
           <div class="stat"><b id="st-total">-</b><span>total nodes</span></div>
           <div class="stat" id="st-alarm-box"><b id="st-alarm">-</b><span>nodes in alarm</span></div>
-          <div class="stat"><b id="st-gw">-</b><span>gateways online</span></div>
+          <div class="stat"><b id="st-gw">-</b><span id="st-gw-note">gateways online</span></div>
         </div>
+        <!-- Clusters with a node in alarm: which cluster, which gateway; press to see the node. -->
         <div id="blocks"></div>
-        <div class="node-list">
-          <table class="nodes">
-            <thead><tr><th>Node</th><th>State</th><th>Last seen</th><th class="num">T &deg;C</th><th class="num">RH %</th><th class="num">Gas vs base</th></tr></thead>
-            <tbody id="nodes"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody>
-          </table>
-        </div>
+        <!-- Drill-down: gateways, then a gateway's clusters, then a cluster's nodes. -->
+        <nav class="crumbs" id="net-crumbs" aria-label="Sensor network level"></nav>
+        <div class="net-view" id="net-view" aria-live="polite"></div>
         <p class="muted small" id="net-foot"></p>
       </div>
 
@@ -75,17 +74,24 @@
         <div class="panel-head"><h2>THERMAL CAMERA</h2></div>
         <div class="phase2-body"></div>
       </div>
-
-      <div class="panel log-panel">
-        <div class="panel-head"><h2>EVENT LOG</h2><span class="muted">newest at the bottom</span></div>
-        <ol class="log" id="log" aria-live="polite"></ol>
-      </div>
     </section>
   </main>
 
+  <p id="clear-notice" class="clear-notice" role="status"></p>
+  <dialog id="clear-dialog" aria-labelledby="clear-title">
+    <form id="clear-form">
+      <h2 id="clear-title">Clear Alarm — <span id="clear-node"></span></h2>
+      <p>Are you sure you want to clear this fire alarm? Only clear it after the situation has been checked. This action will not delete the alarm history or disable future fire detection.</p>
+      <label for="clear-token">Operator administrative token</label>
+      <input id="clear-token" type="password" required autocomplete="off" spellcheck="false" maxlength="256">
+      <p id="clear-error" role="alert"></p>
+      <div class="clear-actions"><button id="clear-cancel" type="button">Cancel</button><button id="clear-confirm" type="submit">Confirm</button></div>
+    </form>
+  </dialog>
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/vendor/markercluster/leaflet.markercluster.js"></script>
   <script src="/static/common.js"></script>
+  <script src="/static/alarm-clear.js"></script>
   <script src="/static/console.js"></script>
 </body>
 </html>

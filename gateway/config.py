@@ -190,6 +190,9 @@ class LorawanConfig(_Strict):
 
 
 class SimulatorConfig(_Strict):
+    reporting_mode: Literal["legacy", "event_driven"] = "legacy"
+    state_path: str = "data/simulator-state.sqlite"
+
     application_id: str
     application_name: str
     gateway_id: str
@@ -234,6 +237,14 @@ class HalfLives(_Strict):
 
 
 class DetectionConfig(_Strict):
+    # Explicit control protocol uses real daily heartbeats; legacy demo timing is unchanged.
+    explicit_heartbeat_minutes: float = Field(default=1440, gt=0)
+    explicit_missed_heartbeats: int = Field(default=3, ge=1)
+
+    @property
+    def explicit_missing_minutes(self) -> float:
+        return self.explicit_heartbeat_minutes * self.explicit_missed_heartbeats
+
     baseline_half_life_minutes: HalfLives
     warmup_samples: int = Field(ge=1)
     replay_hours_on_startup: float = Field(ge=0)
@@ -263,9 +274,24 @@ class TelegramConfig(_Strict):
     timeout_seconds: float = Field(gt=0)
 
 
+class EmailConfig(_Strict):
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = Field(default=587, gt=0, lt=65536)
+    # starttls (port 587), ssl (port 465), or none (local relay only).
+    security: Literal["starttls", "ssl", "none"] = "starttls"
+    # Names of the environment variables holding the login, password and
+    # addresses (never the values themselves).
+    username_env: str = "ALERT_EMAIL_USER"
+    password_env: str = "ALERT_EMAIL_PASSWORD"
+    from_env: str = "ALERT_EMAIL_FROM"
+    to_env: str = "ALERT_EMAIL_TO"
+    timeout_seconds: float = Field(default=15, gt=0)
+
+
 class NotifiersConfig(_Strict):
-    enabled: list[Literal["console", "telegram", "sms"]]
+    enabled: list[Literal["console", "telegram", "email", "sms"]]
     telegram: TelegramConfig
+    email: EmailConfig = EmailConfig()
 
 
 class WebConfig(_Strict):
@@ -285,12 +311,23 @@ class _Located(_Strict):
 class SiteNode(_Located):
     dev_eui: str
     label: str = Field(min_length=1)  # e.g. "F-07-03"
-    block: str = Field(min_length=1)  # e.g. "F-07"
+    block: str = Field(min_length=1)  # e.g. "F-07"; the console calls it a cluster
+    # The gateway this node's cluster belongs to. Optional when there is only
+    # one gateway: every node is then assigned to it.
+    gateway_id: str | None = None
+    # True when lat/lon are the node's real GPS position (entered in
+    # config.yaml), False when they are a planned grid position.
+    surveyed: bool = False
 
     @field_validator("dev_eui")
     @classmethod
     def _dev_eui_hex(cls, v: str) -> str:
         return _hex(v, 16, "dev_eui")
+
+    @field_validator("gateway_id")
+    @classmethod
+    def _node_gateway_hex(cls, v: str | None) -> str | None:
+        return None if v is None else _hex(v, 16, "gateway_id")
 
 
 class SiteGateway(_Located):
@@ -305,19 +342,93 @@ class SiteGateway(_Located):
 
 class SiteCentre(_Located):
     label: str = Field(min_length=1)
+    entity_id: str = "MCU-01"
+    role: str = "Main Control Unit"
+    status: Literal["planned"] = "planned"
+    provisional: Literal[True] = True
+
+
+class SiteDrone(_Located):
+    entity_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    status: Literal["planned"] = "planned"
+    provisional: Literal[True] = True
+
+
+class DemoOffset(_Strict):
+    east_m: float = Field(ge=-10000, le=10000)
+    north_m: float = Field(ge=-10000, le=10000)
+
+
+class DemoLayout(_Strict):
+    centre: _Located                      # centre of the 3 x 3 pilot grid
+    # A single gateway without lat/lon is placed this far from the grid centre.
+    # With several gateways, give each one its lat/lon under sites.gateways.
+    gateway_distance_m: float | None = Field(default=None, ge=0, le=10000)
+    gateway_bearing_deg: float | None = Field(default=None, ge=0, lt=360)
+    # Theoretical gateway range (docs/GATEWAY-COVERAGE.md); drawn on the map.
+    gateway_range_m: float | None = Field(default=None, gt=0, le=20000)
+    # Reserve outline [[lat, lon], ...], split into one sector per gateway.
+    reserve: list[tuple[float, float]] | None = None
+    # Offset from the grid centre ({east_m, north_m}) or a position ({lat, lon}).
+    drone: DemoOffset | _Located
+    control_unit: DemoOffset | _Located
+
+    @model_validator(mode="after")
+    def _reserve_ring(self) -> DemoLayout:
+        if self.reserve is not None:
+            if len(self.reserve) < 3:
+                raise ValueError("demo_layout.reserve needs at least three points")
+            for lat, lon in self.reserve:
+                _Located.model_validate({"lat": lat, "lon": lon})
+        if (self.gateway_distance_m is None) != (self.gateway_bearing_deg is None):
+            raise ValueError("demo_layout: set both gateway_distance_m and gateway_bearing_deg, or neither")
+        return self
+
 
 
 class SitesConfig(_Strict):
     nodes: list[SiteNode]
     gateways: list[SiteGateway]
     centre: SiteCentre
+    drone: SiteDrone | None = None
 
     @model_validator(mode="after")
     def _unique_ids(self) -> SitesConfig:
         _unique([n.dev_eui for n in self.nodes], "site node dev_eui")
         _unique([n.label for n in self.nodes], "site node label")
         _unique([g.gateway_id for g in self.gateways], "gateway_id")
+        known = {g.gateway_id for g in self.gateways}
+        for n in self.nodes:
+            if n.gateway_id is None:
+                raise ValueError(f"site node {n.label}: set gateway_id (there is more than one gateway)")
+            if n.gateway_id not in known:
+                raise ValueError(f"site node {n.label}: gateway_id {n.gateway_id} is not a site gateway")
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_gateway(cls, raw):
+        """With a single gateway, every node without gateway_id belongs to it."""
+        if not isinstance(raw, dict):
+            return raw
+        gws, nodes = raw.get("gateways"), raw.get("nodes")
+        if not (isinstance(gws, list) and len(gws) == 1 and isinstance(nodes, list)):
+            return raw
+        only = gws[0].get("gateway_id") if isinstance(gws[0], dict) else getattr(gws[0], "gateway_id", None)
+        if only is None:
+            return raw
+        out = []
+        for node in nodes:
+            if isinstance(node, dict) and node.get("gateway_id") is None:
+                node = {**node, "gateway_id": only}
+            elif isinstance(node, SiteNode) and node.gateway_id is None:
+                node = node.model_copy(update={"gateway_id": _hex(only, 16, "gateway_id")})
+            out.append(node)
+        return {**raw, "nodes": out}
+
+    def gateway(self, gateway_id: str | None) -> SiteGateway | None:
+        return next((g for g in self.gateways if g.gateway_id == gateway_id), None)
 
     def node(self, dev_eui: str) -> SiteNode | None:
         dev_eui = dev_eui.lower()
@@ -331,21 +442,24 @@ class SitesConfig(_Strict):
 # --- operator console ------------------------------------------------------
 
 class TileLayer(_Strict):
+    max_native_zoom: int | None = Field(default=None, ge=1, le=22)
     url: str
     attribution: str
     max_zoom: int = Field(ge=1, le=22)
 
 
 class MapConfig(_Strict):
+    show_nodes_in_overview: bool = False
+
     centre_lat: float = Field(ge=-90, le=90)
     centre_lon: float = Field(ge=-180, le=180)
     zoom: int = Field(ge=1, le=20)
-    # Below this zoom the map shows gateways, the centre and nodes in ALARM
-    # only; every (clustered) node marker appears at this zoom and closer.
+    # Legacy detail/clustering threshold. Demo mode uses at least zoom 18
+    # (capped by tile limits), with individual nodes and an overview summary.
     node_detail_zoom: int = Field(ge=2, le=22)
     # Nearby node markers closer than this (screen pixels) share one badge.
     cluster_radius_px: int = Field(ge=10, le=200)
-    # Radius drawn around each node in ALARM: sensor coverage, NOT fire extent.
+    # Sensor coverage radius, NOT fire extent or the demo alarm-highlight radius.
     alarm_zone_radius_m: float = Field(gt=0)
     primary_tiles: TileLayer
     fallback_tiles: TileLayer
@@ -365,6 +479,9 @@ class FeaturesConfig(_Strict):
     thermal_camera: bool
     drone: bool
     wind_station: bool
+    # Demo only: on a fire alarm the console shows a SIMULATED drone flying
+    # from its base to the node, clearly labelled as a simulation.
+    drone_simulation: bool = False
 
 
 class ConsoleConfig(_Strict):
@@ -375,6 +492,14 @@ class ConsoleConfig(_Strict):
 
 
 class Config(_Strict):
+    demo_layout: DemoLayout | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_layout(cls, raw):
+        return _apply_demo_layout(raw) if isinstance(raw, dict) else raw
+
+
     mqtt: MqttConfig
     database: DatabaseConfig
     timing: TimingConfig
@@ -440,6 +565,7 @@ def apply_speedup(cfg: Config) -> Config:
             "max_baseline_freeze_minutes": d.max_baseline_freeze_minutes / k,
             "notify_cooldown_minutes": d.notify_cooldown_minutes / k,
             "offline_after_minutes": d.offline_after_minutes / k,
+            "explicit_heartbeat_minutes": d.explicit_heartbeat_minutes / k,
         }),
         "simulator": s.model_copy(update={
             "smoke": s.smoke.model_copy(update={
@@ -455,6 +581,61 @@ def apply_speedup(cfg: Config) -> Config:
         }),
         "web": cfg.web.model_copy(update={"chart_hours": cfg.web.chart_hours / k}),
     })
+
+
+def _apply_demo_layout(raw: dict[str, Any]) -> dict[str, Any]:
+    """Resolve demo positions once; legacy explicit-coordinate configs still work.
+
+    Sort by stable devEUI so YAML ordering cannot move existing identities.
+    A node with both lat and lon in config.yaml keeps them: that is its real
+    GPS position (surveyed). Every other node gets its planned grid cell.
+    """
+    if raw.get("demo_layout") is None:
+        return raw
+    from gateway.geometry import destination, grid_positions, offset_position
+
+    layout = DemoLayout.model_validate(raw["demo_layout"])
+    sites = raw["sites"]
+    nodes = sites["nodes"]
+    ids = [_hex(n["dev_eui"], 16, "dev_eui") for n in nodes]
+    _unique(ids, "site node dev_eui")
+    gws = sites["gateways"]
+    if len(nodes) != 9 or not gws:
+        raise ValueError("demo_layout requires exactly nine nodes and at least one gateway")
+    sim_ids = {n["dev_eui"].lower() for n in raw["simulator"]["nodes"]}
+    if set(ids) != sim_ids:
+        raise ValueError("demo_layout site and simulator node identities must match")
+    sim_gw = raw["simulator"]["gateway_id"].lower()
+    if sim_gw not in {g["gateway_id"].lower() for g in gws}:
+        raise ValueError("demo_layout: the simulator's gateway must be one of the site gateways")
+    lat, lon = layout.centre.lat, layout.centre.lon
+    for node, position in zip(sorted(nodes, key=lambda n: n["dev_eui"].lower()), grid_positions(lat, lon)):
+        if "lat" in node and "lon" in node:
+            _Located.model_validate({"lat": node["lat"], "lon": node["lon"]})
+            node["surveyed"] = True
+        elif "lat" in node or "lon" in node:
+            raise ValueError(f"site node {node.get('label')}: give both lat and lon, or neither")
+        else:
+            node.update(position)
+    for g in gws:
+        if "lat" in g and "lon" in g:
+            continue
+        if len(gws) == 1 and layout.gateway_distance_m is not None:
+            g.update(destination(lat, lon, layout.gateway_distance_m, layout.gateway_bearing_deg))
+        else:
+            raise ValueError(f"gateway {g.get('label')}: give its lat and lon (or, with a single gateway, "
+                             "set demo_layout.gateway_distance_m and gateway_bearing_deg)")
+    # The simulator sends every uplink through one gateway, so the pilot's
+    # nodes belong to it unless config.yaml says otherwise.
+    for node in nodes:
+        node.setdefault("gateway_id", sim_gw)
+    for key, where in (("drone", layout.drone), ("centre", layout.control_unit)):
+        if isinstance(where, DemoOffset):
+            sites[key].update(offset_position(lat, lon, where.east_m, where.north_m))
+        else:
+            sites[key].update(lat=where.lat, lon=where.lon)
+    raw["console"]["map"].update(centre_lat=lat, centre_lon=lon)
+    return raw
 
 
 def load_config(path: str | Path | None = None, env: dict[str, str] | None = None) -> Config:
@@ -504,6 +685,13 @@ def summary(cfg: Config) -> str:
         f"sites               {len(cfg.sites.nodes)} nodes, {len(cfg.sites.gateways)} gateways, "
         f"centre: {cfg.sites.centre.label}",
     ]
+    if cfg.simulator.reporting_mode == "event_driven":
+        lines[1:5] = [
+            f"heartbeat           every {_duration(d.explicit_heartbeat_minutes)} (event-driven)",
+            "fire alerts         one per local ALARM episode; no routine telemetry",
+            f"node MISSING after  {_duration(d.explicit_missing_minutes)} ({d.explicit_missed_heartbeats} intervals)",
+            f"local sampling      every {cfg.simulator.firmware.sample_seconds:g} s; warm-up {d.warmup_samples} samples",
+        ]
     blocks: dict[str, list[str]] = {}
     for n in cfg.sites.nodes:
         blocks.setdefault(n.block, []).append(n.label)
@@ -514,8 +702,14 @@ def summary(cfg: Config) -> str:
     if sim_euis - site_euis:
         lines.append(f"  WARNING: simulator nodes without a site entry: {sorted(sim_euis - site_euis)}")
     m, f = cfg.console.map, cfg.console.features
-    lines += ["", f"map detail          below zoom {m.node_detail_zoom} (default view {m.zoom}) only "
-              f"ALARM nodes; all nodes from {m.node_detail_zoom}, clustered within {m.cluster_radius_px} px",
+    if cfg.demo_layout:
+        detail = min(max(m.node_detail_zoom, 18), m.primary_tiles.max_zoom, m.fallback_tiles.max_zoom)
+        map_description = (f"map detail          demo grid: individual nodes from zoom {detail}; "
+                           "overview: network summary and active alarms")
+    else:
+        map_description = (f"map detail          below zoom {m.node_detail_zoom} (default view {m.zoom}) only "
+                           f"ALARM nodes; all nodes from {m.node_detail_zoom}, clustered within {m.cluster_radius_px} px")
+    lines += ["", map_description,
               "phase-2 panels      " + ", ".join(
         f"{name} {'ON' if on else 'off'}" for name, on in
         (("thermal camera", f.thermal_camera), ("drone", f.drone), ("wind station", f.wind_station)))]

@@ -35,13 +35,15 @@ database:
   max_queued_writes: 200000
 
 timing:
-  # Nodes report on a slow heartbeat (LoRaWAN duty cycle, battery), and ALSO
-  # transmit straight away when their own readings breach a local threshold.
+  # Legacy measurement-reporting cadence. Event-driven nodes instead use
+  # detection.explicit_heartbeat_minutes and explicit_missed_heartbeats.
   heartbeat_minutes: 10
-  # A node is MISSING after this many heartbeats with no uplink. The detection
+  # A legacy node is MISSING after this many intervals. The detection
   # service's offline alert uses the same value: 10 min x 3 = 30 min.
   missed_heartbeats_for_missing: 3
-  # Demo speed-up. 1 = real time (the deployment default). 60 = a 10-minute
+  # Demo speed-up. Event-driven x60: daily heartbeat becomes 24 real minutes,
+  # missing threshold 72 real minutes, local samples 1 real second apart.
+  # Legacy example: 60 = a 10-minute
   # heartbeat every 10 s, a 30-minute missing threshold of 30 s, and so on.
   # Divides every wall-clock duration (heartbeat, half-lives, cooldown, smoke
   # ramp...). Does NOT change sample counts: warm-up is still 30 readings.
@@ -51,16 +53,18 @@ timing:
   # console's event log this often (nodes reporting, gateways, alarms).
   system_check_minutes: 60
 
-# LoRaWAN application ports (fPort) the node firmware sends on.
-# PLACEHOLDER until the real firmware exists, and a REQUIREMENT on it: the
-# gateway tells a normal heartbeat from an alarm-mode uplink (the node's own
-# sensor saw a change and it now reports every minute) by this port,
-# never by guessing from timing. Same 11-byte payload on both ports.
+# Provisional LoRaWAN application ports; physical firmware is not supplied.
+# Event-driven mode: version-2 two-byte HEARTBEAT on port 2, FIRE_ALERT on 3.
+# The payload discriminator establishes message type; rate alone is not an alarm.
+# Legacy mode retains version-1 11-byte readings on both ports, with port 3
+# indicating rapid reporting rather than an explicit fire alert.
 lorawan:
   heartbeat_f_port: 2
   alarm_mode_f_port: 3
 
 simulator:
+  reporting_mode: event_driven
+  state_path: data/simulator-state.sqlite
   # ChirpStack v4 application IDs are UUIDs.
   application_id: "3f6c1a52-8b0e-4d1c-9a57-2e4b8c7d9f10"
   application_name: "wildfire-detection"
@@ -113,7 +117,10 @@ simulator:
     temperature_rise_c: 6.0
     humidity_drop_pct: 15.0
 
-  # PLACEHOLDER node firmware (the real firmware is not written yet). These
+  # Simulated firmware only. Event-driven mode uses the shared NodeDetector,
+  # samples at sample_seconds, and sends daily HEARTBEAT / local FIRE_ALERT only.
+  # The gas-only trigger and rapid-reporting settings below apply to LEGACY mode.
+  # Legacy firmware settings (the real firmware is not written yet). These
   # decide WHEN a simulated node transmits; the gateway does not read them.
   # The node reads its sensor every sample_seconds. It transmits:
   #   - a heartbeat every timing.heartbeat_minutes, and
@@ -123,6 +130,7 @@ simulator:
   # never faster than the EU868 duty cycle allows at its spreading factor
   # (1 % for 11 bytes: SF7 ~6 s between uplinks ... SF11 ~82 s, SF12 ~148 s),
   # and only on a sensor read (so a slow node's gap rounds up to the next read).
+  # Historical legacy-mode estimates, not event-driven acceptance evidence:
   # Read rate from the power study (Power Analysis & Architecture, VIP402):
   # wake every 60 s, 5 s awake, about 3 years on the battery. Reading every
   # 30 s would halve that (about 1.6 years) for a faster alarm.
@@ -185,7 +193,63 @@ simulator:
       rssi_dbm: -114
       snr_db: -6.5
 
+  # Additional synthetic demo sensors; these are not field measurements.
+    - name: node-5
+      dev_eui: "70b3d57ed0000005"
+      dev_addr: "260b0005"
+      temperature_c: 22.0
+      humidity_pct: 55.0
+      pressure_hpa: 1008.0
+      gas_resistance_ohm: 180000
+      battery_v: 3.62
+      rssi_dbm: -92
+      snr_db: 7.5
+    - name: node-6
+      dev_eui: "70b3d57ed0000006"
+      dev_addr: "260b0006"
+      temperature_c: 22.0
+      humidity_pct: 55.0
+      pressure_hpa: 1008.0
+      gas_resistance_ohm: 180000
+      battery_v: 3.62
+      rssi_dbm: -92
+      snr_db: 7.5
+    - name: node-7
+      dev_eui: "70b3d57ed0000007"
+      dev_addr: "260b0007"
+      temperature_c: 22.0
+      humidity_pct: 55.0
+      pressure_hpa: 1008.0
+      gas_resistance_ohm: 180000
+      battery_v: 3.62
+      rssi_dbm: -92
+      snr_db: 7.5
+    - name: node-8
+      dev_eui: "70b3d57ed0000008"
+      dev_addr: "260b0008"
+      temperature_c: 22.0
+      humidity_pct: 55.0
+      pressure_hpa: 1008.0
+      gas_resistance_ohm: 180000
+      battery_v: 3.62
+      rssi_dbm: -92
+      snr_db: 7.5
+    - name: node-9
+      dev_eui: "70b3d57ed0000009"
+      dev_addr: "260b0009"
+      temperature_c: 22.0
+      humidity_pct: 55.0
+      pressure_hpa: 1008.0
+      gas_resistance_ohm: 180000
+      battery_v: 3.62
+      rssi_dbm: -92
+      snr_db: 7.5
+
 detection:
+  # Version-2 HEARTBEAT/FIRE_ALERT connectivity only; simulator schedule unchanged.
+  # Durations below are simulated minutes and scale with DEMO_SPEEDUP.
+  explicit_heartbeat_minutes: 1440
+  explicit_missed_heartbeats: 3
   # EWMA baseline per node, per channel. Weight comes from the real time gap
   # between readings, so missed packets and longer intervals are handled.
   # Gas keeps a slow 2 h baseline. Temperature and humidity use a faster one:
@@ -237,16 +301,32 @@ detection:
   # Derived automatically: do not set offline_after_minutes here.
 
 notifiers:
-  # Any of: console, telegram, sms
+  # Any of: console, telegram, email, sms
   #   telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID set (see README)
+  #   email needs ALERT_EMAIL_USER, ALERT_EMAIL_PASSWORD and ALERT_EMAIL_TO
+  #     set (ALERT_EMAIL_FROM optional); see docs/ALERTS.md
   #   sms is a STUB: enabling it stops the service from starting until
-  #   gateway/notify/sms.py is implemented
+  #   gateway/notify/sms.py is implemented (requirements: docs/ALERTS.md)
+  # Browser (web) notifications need nothing here: the operator turns them
+  # on with the "Desktop alerts" button on the console.
   enabled: [console]
   telegram:
     # Names of the environment variables holding the secrets (never the secrets).
     bot_token_env: TELEGRAM_BOT_TOKEN
     chat_id_env: TELEGRAM_CHAT_ID
     timeout_seconds: 10
+  email:
+    # Gmail: smtp.gmail.com, 587, starttls, with an app password.
+    # Outlook / Office 365: smtp.office365.com, 587, starttls.
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    security: starttls        # starttls (587), ssl (465) or none (local relay)
+    # Names of the environment variables (never the values).
+    username_env: ALERT_EMAIL_USER
+    password_env: ALERT_EMAIL_PASSWORD
+    from_env: ALERT_EMAIL_FROM
+    to_env: ALERT_EMAIL_TO      # comma-separated list of recipients
+    timeout_seconds: 15
 
 web:
   host: 127.0.0.1
@@ -259,64 +339,150 @@ web:
 # its ChirpStack device name and is not placed on the map.
 #
 # !!! PLACEHOLDER POSITIONS !!!
-# Every lat/lon below is MADE UP, scattered around the Bkassine reserve for
+# Positions below are generated around a provisional Bkassine reference for
 # the demo. They MUST be replaced with coordinates from a real site survey
 # before any deployment: operators will dispatch crews to these points.
+# Provisional demo geometry, NOT surveyed coordinates or evidence of radio range.
+#
+# Reserve: the outline of the grid in the team's "Pilot scale project
+# location" figure, traced onto satellite imagery (about 2.2 x 1.6 km,
+# 2.6 km2; accurate to roughly +-50 m). The pilot grid sits on the highlighted
+# square of that figure: a 100 m square, 3 x 3 cells, 33.3 m apart. Cell
+# assignment: sorted devEUI, NW to SE.
+#
+# Gateways: five, placed so every point of the reserve is as close as
+# possible to one (worst case about 580 m). Their theoretical range in forest
+# (path-loss exponent 4, SF10, 10 dB margin) is about 524 m: 99 % of the
+# reserve is within SF10 range, 100 % within SF11. Method and numbers:
+# docs/GATEWAY-COVERAGE.md. Real gateway sites need a survey (high ground,
+# power, line of sight); these are the theoretical optimum.
+#
+# Main Control Unit in the village at the top left; drone base in the middle
+# of the reserve.
+#
+# GPS: to put a node at the exact point where it was installed, add
+#   lat: 33.56125
+#   lon: 35.56811
+# to its entry under sites.nodes. It then keeps that position (shown as
+# "surveyed" on the console) instead of its planned grid cell.
+demo_layout:
+  centre: {lat: 33.56117, lon: 35.56808}
+  gateway_range_m: 524
+  control_unit: {lat: 33.55994, lon: 35.56131}
+  drone: {lat: 33.55666, lon: 35.57133}
+  reserve:
+    - [33.56356, 35.56060]
+    - [33.56356, 35.56694]
+    - [33.56197, 35.56694]
+    - [33.56197, 35.57751]
+    - [33.56356, 35.57751]
+    - [33.56356, 35.57966]
+    - [33.56197, 35.57966]
+    - [33.56197, 35.58180]
+    - [33.56037, 35.58180]
+    - [33.56037, 35.58394]
+    - [33.55719, 35.58394]
+    - [33.55719, 35.58180]
+    - [33.55400, 35.58180]
+    - [33.55400, 35.57966]
+    - [33.55082, 35.57966]
+    - [33.55082, 35.57123]
+    - [33.54934, 35.57123]
+    - [33.54934, 35.56266]
+    - [33.55400, 35.56266]
+    - [33.55400, 35.56060]
+    - [33.55719, 35.56060]
+    - [33.55719, 35.56266]
+    - [33.56037, 35.56266]
+    - [33.56037, 35.56060]
+
 sites:
   nodes:
     - dev_eui: "70b3d57ed0000001"
       label: "F-07-01"
       block: "F-07"
-      lat: 33.5552   # PLACEHOLDER
-      lon: 35.5631   # PLACEHOLDER
     - dev_eui: "70b3d57ed0000002"
       label: "F-07-02"
       block: "F-07"
-      lat: 33.5561   # PLACEHOLDER
-      lon: 35.5662   # PLACEHOLDER
     - dev_eui: "70b3d57ed0000003"
       label: "F-07-03"
       block: "F-07"
-      lat: 33.5541   # PLACEHOLDER
-      lon: 35.5686   # PLACEHOLDER
     - dev_eui: "70b3d57ed0000004"
       label: "F-08-01"
       block: "F-08"
-      lat: 33.5507   # PLACEHOLDER
-      lon: 35.5703   # PLACEHOLDER
+    - dev_eui: "70b3d57ed0000005"
+      label: "F-08-02"
+      block: "F-08"
+    - dev_eui: "70b3d57ed0000006"
+      label: "F-08-03"
+      block: "F-08"
+    - dev_eui: "70b3d57ed0000007"
+      label: "F-09-01"
+      block: "F-09"
+    - dev_eui: "70b3d57ed0000008"
+      label: "F-09-02"
+      block: "F-09"
+    - dev_eui: "70b3d57ed0000009"
+      label: "F-09-03"
+      block: "F-09"
+  # Clusters are the node "block"s (F-07, F-08, F-09). Each node belongs to
+  # one gateway: set gateway_id on a node when there is more than one gateway;
+  # with a single gateway every node is assigned to it.
+  # GW-01 serves the pilot grid (376 m away); it is the simulator's gateway.
+  # The other four have no nodes yet: the console shows them as planned.
   gateways:
     - gateway_id: "0016c001ff100001"
-      label: "GW-01 ridge"
-      lat: 33.5586   # PLACEHOLDER
-      lon: 35.5622   # PLACEHOLDER
+      label: "GW-01 north-centre"
+      lat: 33.55893
+      lon: 35.57111
+    - gateway_id: "0016c001ff100002"
+      label: "GW-02 north-west"
+      lat: 33.55921
+      lon: 35.56378
+    - gateway_id: "0016c001ff100003"
+      label: "GW-03 north-east"
+      lat: 33.55930
+      lon: 35.57967
+    - gateway_id: "0016c001ff100004"
+      label: "GW-04 south-west"
+      lat: 33.55192
+      lon: 35.56597
+    - gateway_id: "0016c001ff100005"
+      label: "GW-05 south-east"
+      lat: 33.55290
+      lon: 35.57659
   centre:
-    label: "Bkassine Civil Defence Centre"
-    lat: 33.5489     # PLACEHOLDER
-    lon: 35.5598     # PLACEHOLDER
+    label: "Main Control Unit - Bkassine municipality"
+  drone:
+    entity_id: "UAV-01"
+    label: "Drone UAV-01"
 
 console:
   title: "BKASSINE CIVIL DEFENCE CENTRE"
   subtitle: "Forest fire early-warning and suppression - operator console"
   map:
     # Bkassine forest, Jezzine district, Lebanon.
-    centre_lat: 33.5530
-    centre_lon: 35.5660
+    # centre_lat/lon are derived from demo_layout.centre.
+    show_nodes_in_overview: true
     zoom: 15
-    # Level of detail. Below node_detail_zoom (including the default view)
-    # the map shows only gateways and the centre, plus a red marker for every
-    # node in ALARM (an alarm is never hidden by zooming out). From
-    # node_detail_zoom in, every node marker appears; markers closer than
-    # cluster_radius_px on screen collapse into one count badge.
+    # Demo grid detail begins at max(node_detail_zoom, 18), capped by tile
+    # max zoom. Every grid node is individual there; overview shows a network
+    # summary and unclustered alarms. show_nodes_in_overview is retained for
+    # config compatibility; the current frontend uses zoom-dependent layers.
+    # Without demo_layout, node_detail_zoom enables ordinary node clustering.
     # Must be greater than zoom.
     node_detail_zoom: 17
     cluster_radius_px: 50
-    # The red zone drawn around nodes in ALARM when zoomed in. This is the
-    # area the SENSORS cover, not the extent of the fire.
+    # Sensor coverage radius, not fire extent. Demo mode exposes this as an
+    # optional muted coverage layer, separate from the 15 m alarm highlights.
+    # Non-demo layouts retain the legacy red coverage visualization.
     alarm_zone_radius_m: 150
     # No API key needed. Both need internet; without it the markers and
     # alarm zones still draw, on a blank background. Check each provider's
     # terms of use before production use.
     primary_tiles:
+      # Enlarge these tiles at closer zooms instead of requesting missing imagery.
+      max_native_zoom: 17
       url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
       attribution: "Imagery &copy; Esri, Maxar, Earthstar Geographics, GIS User Community"
       max_zoom: 19
@@ -331,3 +497,5 @@ console:
     thermal_camera: false
     drone: false
     wind_station: false
+    # Demo: on a fire alarm, show a SIMULATED drone dispatch from its base.
+    drone_simulation: true

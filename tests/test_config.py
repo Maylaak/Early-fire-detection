@@ -9,7 +9,7 @@ from gateway.config import DEFAULT_CONFIG_PATH, load_config
 
 def test_shipped_config_loads():
     cfg = load_config(DEFAULT_CONFIG_PATH, env={})
-    assert len(cfg.simulator.nodes) == 4
+    assert len(cfg.simulator.nodes) == 9
     assert cfg.detection.baseline_half_life_minutes.gas == 120
     assert cfg.timing.heartbeat_minutes == 10
 
@@ -143,3 +143,11 @@ def test_node_detail_zoom_is_checked(tmp_path, detail, match):
 
     with pytest.raises(ValidationError, match=match):
         load_config(_write_modified(tmp_path, mutate), env={})
+
+def test_map_summary_matches_demo_and_legacy_modes():
+    from gateway.config import summary
+    cfg = load_config(env={})
+    assert "individual nodes from zoom 18" in summary(cfg)
+    assert "overview: network summary and active alarms" in summary(cfg)
+    legacy = cfg.model_copy(update={"demo_layout": None})
+    assert "all nodes from 17, clustered within 50 px" in summary(legacy)

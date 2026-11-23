@@ -28,6 +28,7 @@ events, alerts and the console log; the devEUI stays in the database.
 from __future__ import annotations
 
 import argparse
+import copy
 import logging
 import queue
 import sys
@@ -39,15 +40,16 @@ from typing import TypeVar
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from gateway import console_log as clog
-from gateway.codec import SensorReading
+from gateway.codec import SensorReading, ControlMessage
+from gateway.commands import CommandSettings, start_command_server, unavailable
 from gateway.config import Config, load_config
 from gateway.db import init_schema, make_engine, utcnow
 from gateway.detect import DetectionEngine, Event
 from gateway.ingest import Accepted, Ingestor, log_reading
 from gateway.mqtt import BrokerUnavailable, connect
 from gateway.notify import Dispatcher, NotifierConfigError, build_notifiers, headline
-from gateway.store import NodeState, Store
-from gateway.writer import EventRef, EventsJob, LogJob, NotifiedJob, ReadingJob, Writer
+from gateway.store import NodeState, Store, uplink_key
+from gateway.writer import ClearAlarmJob, ControlJob, EventRef, EventsJob, LogJob, NotifiedJob, ReadingJob, Writer
 
 log = logging.getLogger("gateway.service")
 
@@ -103,11 +105,29 @@ def _replay(cfg: Config, store: Store, engine: DetectionEngine, now: datetime | 
         engine.process(r.dev_eui, _label(cfg, r.dev_eui, r.name), r.time, SensorReading(
             r.temperature_c, r.humidity_pct, r.pressure_hpa, r.gas_resistance_ohm,
             r.battery_v, r.gas_saturated))
+    cleared_nodes = store.manually_cleared_nodes()
     for n in store.all_nodes():
         d = engine.node(n.dev_eui, _label(cfg, n.dev_eui, n.name))
         if d.last_time is None:  # known node, silent for the whole replay window
             d.last_time = n.last_seen
         d.online = n.online
+        d.last_contact = n.last_seen
+        d.last_message_type = n.last_message_type
+        if n.dev_eui in cleared_nodes:
+            # Replayed pre-clear legacy readings must not resurrect an old alarm.
+            # Persisted current state also includes any legitimate post-clear alert.
+            d.state, d.state_since = n.state, n.state_since
+            d.last_manual_clear = cleared_nodes[n.dev_eui]
+            d._up = d._down = 0
+            if n.state == 'NORMAL':
+                d._last_notified = {}
+                d._episode_notified = False
+        if n.last_message_type in ("HEARTBEAT", "FIRE_ALERT"):
+            d.state, d.state_since = n.state, n.state_since
+        d.explicit_fire_active = bool(n.explicit_fire_active)
+        if d.explicit_fire_active:
+            d.state, d.state_since = "ALARM", n.state_since
+    engine.control_keys = store.control_keys()
     store.save_node_states(engine.nodes.values())
     log.info("replayed %d readings from the last %gh: %s", len(rows),
              cfg.detection.replay_hours_on_startup,
@@ -127,13 +147,71 @@ class Pipeline:
         self.writer = writer
         self.dispatcher = dispatcher
         self.gateways_seen = gateways_seen if gateways_seen is not None else {}
+        self.pending_clears = {}
+        self.deferred_uplinks = {}
+
+    def request_clear(self, command, now):
+        if time.monotonic() > command.deadline:
+            command.result.set_result(unavailable())
+            return
+        d = self.engine.nodes.get(command.dev_eui)
+        if d is None:
+            command.result.set_result((404, {'detail': 'Unknown node'}))
+            return
+        if command.dev_eui in self.pending_clears:
+            command.result.set_result((409, {'detail': 'Clear already in progress; refresh status.'}))
+            return
+        event = copy.copy(d).manual_clear(now)
+        site = self.cfg.sites.node(command.dev_eui)
+        job = ClearAlarmJob(command, event, site.block if site else None)
+        self.pending_clears[command.dev_eui] = job
+        self.deferred_uplinks[command.dev_eui] = []
+        self.writer.submit(job)
+
+    def finish_clears(self):
+        # Main detection thread only. Serialize this node's uplinks behind the
+        # transaction, while other nodes continue detecting and notifying.
+        for node, job in list(self.pending_clears.items()):
+            if not job.done.is_set():
+                continue
+            status, body = job.result
+            if status == 200 and body.get('cleared'):
+                self.engine.nodes[node].manual_clear(job.event.time)
+                self.writer.submit(LogJob(self.tracker.update(self.engine.nodes, job.event.time)))
+            elif status == 200 and body.get('state') == 'NORMAL' and body.get('state_since'):
+                # Reconcile an earlier commit whose HTTP/DB acknowledgment was lost.
+                self.engine.nodes[node].manual_clear(datetime.fromisoformat(body['state_since']))
+            del self.pending_clears[node]
+            for got, received_at in self.deferred_uplinks.pop(node):
+                self.on_uplink(got, received_at)
+            job.request.result.set_result((status, body))
 
     def on_uplink(self, got: Accepted, received_at: datetime) -> None:
         up, reading = got.uplink, got.reading
+        if up.dev_eui in self.pending_clears:
+            self.deferred_uplinks[up.dev_eui].append((got, received_at))
+            return
         for g in up.gateways:
             last = self.gateways_seen.get(g.gateway_id)
             if last is None or up.time > last:
                 self.gateways_seen[g.gateway_id] = up.time
+        if isinstance(reading, ControlMessage):
+            key = uplink_key(up)
+            if key in self.engine.control_keys:
+                return
+            self.engine.control_keys.add(key)
+            d = self.engine.node(up.dev_eui, _label(self.cfg, up.dev_eui, up.device_name))
+            event = d.control(up.time, reading.kind)
+            ref = EventRef()
+            if event:
+                event.details.update(uplink_key=key, f_cnt=up.f_cnt, f_port=up.f_port,
+                                     received_at=received_at.isoformat())
+            self.writer.submit(ControlJob(up, reading.kind, received_at, NodeState.of(d), event, ref))
+            if event:
+                _alert(self.dispatcher, [event], [ref])
+                self.writer.submit(LogJob(clog.node_entries([event], self.cfg.sites)
+                    + self.tracker.update(self.engine.nodes, up.time)))
+            return
         ev = self.engine.process(up.dev_eui, _label(self.cfg, up.dev_eui, up.device_name),
                                  up.time, reading)
         log_reading(up, reading, "received")
@@ -142,12 +220,14 @@ class Pipeline:
         self._raise(ev.events, up.time)
 
     def check_offline(self, now: datetime) -> None:
-        self._raise(self.engine.check_offline(now), now)
+        self._raise([e for key, d in self.engine.nodes.items()
+                     if key not in self.pending_clears and (e := d.check_offline(now))], now)
 
     def system_check(self, now: datetime) -> None:
         """(Gateways heard within the missing threshold)/(configured or ever seen),
         from memory, so it works while the database is down."""
-        cutoff = now - timedelta(minutes=self.cfg.timing.missing_after_minutes)
+        cutoff = now - timedelta(minutes=(self.cfg.detection.explicit_missing_minutes
+            if self.cfg.simulator.reporting_mode == "event_driven" else self.cfg.timing.missing_after_minutes))
         known = {g.gateway_id for g in self.cfg.sites.gateways} | set(self.gateways_seen)
         online = sum(t >= cutoff for t in self.gateways_seen.values())
         self.writer.submit(LogJob([clog.system_check(now, self.engine.nodes, online, len(known))]))
@@ -166,8 +246,9 @@ class Pipeline:
 
 
 def run(cfg: Config) -> int:
+    command_settings = CommandSettings.from_env()
     try:
-        notifiers = build_notifiers(cfg.notifiers)
+        notifiers = build_notifiers(cfg.notifiers, sites=cfg.sites)
     except NotifierConfigError as e:
         log.error("notifier setup: %s", e)
         return 1
@@ -208,6 +289,13 @@ def run(cfg: Config) -> int:
         dispatcher.stop()
         return 1
 
+    command_inbox = queue.Queue(maxsize=32)
+    try:
+        command_server = start_command_server(command_settings, command_inbox)
+    except OSError:
+        log.error('Operator command listener could not bind; detection continues with clearing disabled')
+        command_server = None
+
     log.info("detection service running, listening on %s. Ctrl+C to stop.", cfg.mqtt.uplink_topic)
     writer.submit(LogJob([clog.service_started(
         utcnow(), len(engine.nodes), [n.name for n in notifiers], cfg.timing.demo_speedup)]))
@@ -219,6 +307,13 @@ def run(cfg: Config) -> int:
     next_system_check = time.monotonic() + system_check_every
     try:
         while True:
+            pipeline.finish_clears()
+            try:
+                command = command_inbox.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                pipeline.request_clear(command, utcnow())
             try:
                 topic, body, received_at = inbox.get(timeout=1.0)
             except queue.Empty:
@@ -249,6 +344,9 @@ def run(cfg: Config) -> int:
         log.info("stopping (sending any queued alerts and writes first)")
         return 0
     finally:
+        if command_server is not None:
+            command_server.shutdown()
+            command_server.server_close()
         client.loop_stop()
         client.disconnect()
         dispatcher.stop()

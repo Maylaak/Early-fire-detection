@@ -1,7 +1,7 @@
 """Pluggable alert notifiers.
 
-A notifier is anything with `name` and `send(event)`. To add one (e-mail,
-siren relay, ...): subclass Notifier, implement send(), and register it in
+A notifier is anything with `name` and `send(event)`. Built in: console,
+telegram, email; sms is a stub. To add one (siren relay, ...): subclass Notifier, implement send(), and register it in
 build_notifiers(). send() raises NotifierError on failure.
 
 The Dispatcher sends from a background thread, so a slow or unreachable
@@ -22,7 +22,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 
-from gateway.config import NotifiersConfig
+from gateway.config import NotifiersConfig, SitesConfig
 from gateway.detect import ALARM, KIND_OFFLINE, KIND_ONLINE, NORMAL, WATCH, Event
 
 log = logging.getLogger(__name__)
@@ -61,10 +61,13 @@ def format_event(event: Event) -> str:
             f"{event.message}")
 
 
-def build_notifiers(cfg: NotifiersConfig, env: Mapping[str, str] | None = None) -> list[Notifier]:
+def build_notifiers(cfg: NotifiersConfig, env: Mapping[str, str] | None = None,
+                    sites: SitesConfig | None = None) -> list[Notifier]:
     """Create the enabled notifiers. Raises NotifierConfigError if one cannot work,
-    so a misconfigured alarm channel is found at startup, not during a fire."""
+    so a misconfigured alarm channel is found at startup, not during a fire.
+    `sites` lets e-mail say where the node is (cluster, gateway, GPS)."""
     from gateway.notify.console import ConsoleNotifier
+    from gateway.notify.email import EmailNotifier
     from gateway.notify.sms import SmsNotifier
     from gateway.notify.telegram import TelegramNotifier
 
@@ -75,6 +78,8 @@ def build_notifiers(cfg: NotifiersConfig, env: Mapping[str, str] | None = None) 
             out.append(ConsoleNotifier())
         elif name == "telegram":
             out.append(TelegramNotifier.from_config(cfg.telegram, env))
+        elif name == "email":
+            out.append(EmailNotifier.from_config(cfg.email, env, sites))
         elif name == "sms":
             out.append(SmsNotifier())
     if not out:

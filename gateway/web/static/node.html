@@ -3,12 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Node - Wildfire gateway</title>
+  <title>Node - {{centre_title}}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body data-centre="{{centre_title}}">
   <header>
-    <h1>Wildfire gateway</h1>
+    <div class="brand">
+      <h1>{{centre_title}}</h1>
+      <p>{{centre_subtitle}}</p>
+    </div>
     <nav><a href="/">Operator console</a><a href="/alarms">Alarm history</a></nav>
     <span class="updated" id="updated"></span>
   </header>
@@ -101,7 +104,7 @@
       ]);
       const n = data.node;
       const label = labelOf(n.dev_eui, n.name);
-      document.title = `${label} - Wildfire gateway`;
+      document.title = `${label} - ${document.body.dataset.centre}`;
       renderBanners(status);  // after the title: it may prefix [FIRE ALARM]
       document.getElementById("title").textContent = label;
       document.getElementById("state").innerHTML = badge(n.state) + (n.online ? "" : " " + badge("OFFLINE"));

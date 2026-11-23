@@ -22,7 +22,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy.exc import DBAPIError, OperationalError
@@ -224,3 +224,50 @@ class Writer:
             msg = str(e.orig).strip().splitlines()[0] if str(e.orig).strip() else type(e).__name__
             log.error("database unavailable (%s): writes are queued (%d waiting); detection "
                       "and alerts continue. Retrying every %gs.", msg, self.pending, self.retry_seconds)
+
+
+@dataclass(eq=False)
+class ControlJob(Job):
+    uplink: Uplink
+    kind: str
+    received_at: datetime
+    node: NodeState
+    event: Event | None
+    ref: EventRef
+
+    def run(self, store: Store) -> None:
+        self.ref.id = store.save_control(self.uplink, self.kind, self.received_at,
+                                         self.node, self.event)
+
+
+@dataclass(eq=False)
+class ClearAlarmJob(Job):
+    request: object
+    event: Event | None
+    block: str | None
+    done: threading.Event = field(default_factory=threading.Event)
+    result: tuple | None = None
+    attempted: bool = False
+
+    def run(self, store: Store) -> None:
+        from gateway.commands import unavailable
+        # Expired commands cannot initiate a clear. If a commit acknowledgment
+        # was lost, retry the idempotent outcome check before releasing the node.
+        try:
+            if not self.attempted and time.monotonic() > self.request.deadline:
+                self.result = unavailable()
+            else:
+                self.attempted = True
+                self.result = store.clear_alarm(self.request.dev_eui,
+                    self.request.alarm_event_id, self.event, self.block, self.request.deadline)
+        except DBAPIError as exc:
+            if isinstance(exc, OperationalError) or exc.connection_invalidated:
+                raise  # Existing Writer outage retry; node stays serialized until resolved.
+            self.result = unavailable()
+        except Exception:
+            # Fail closed, leave the memory latch untouched, and release the node.
+            # Do not log request credentials or connection details.
+            log.error('Manual clear transaction failed; result not confirmed')
+            self.result = unavailable()
+        if self.result is not None:
+            self.done.set()

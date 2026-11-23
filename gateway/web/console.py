@@ -18,7 +18,15 @@ a site survey; see config.yaml).
 
 "Missing" is judged here from last_seen, with the same threshold as the
 detection service's OFFLINE alert (heartbeat x missed heartbeats), so the
-page is honest even when the detection service itself is down.
+page is honest even when the detection service itself is down. A missing
+node also carries "days_missing": whole days of silence, in simulated days
+when DEMO_SPEEDUP is set (so x60 turns one real day into 24 minutes). A node
+that never reported counts from the first line in the console log, i.e. from
+when monitoring began.
+
+"network_tree" groups the registry for the console's drill-down panel:
+gateway -> clusters (the registry "block") -> nodes, each level with the
+worst state below it.
 """
 
 from __future__ import annotations
@@ -32,7 +40,8 @@ from fastapi import FastAPI, Query
 from sqlalchemy import Connection, func, select
 
 from gateway.config import Config
-from gateway.db import console_log, gateways, nodes, readings
+from gateway.geometry import grid_boundary, polygon_area_m2, sectors
+from gateway.db import console_log, events, gateways, nodes, readings
 
 ALARM, WATCH, WARMUP = "ALARM", "WATCH", "WARMUP"
 PILL_ALARM, PILL_WATCH, PILL_CLEAR, PILL_NO_DATA = "FIRE_ALARM", "WATCH", "ALL_CLEAR", "NO_DATA"
@@ -51,6 +60,11 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
     heartbeat = timedelta(minutes=timing.heartbeat_minutes)
     alarm_port = cfg.lorawan.alarm_mode_f_port
     block_shapes = _block_shapes(sites.nodes, con.map.alarm_zone_radius_m)  # the registry is fixed
+    # A gateway with no registry node is planned: drawn, but not expected to be heard.
+    served = {n.gateway_id for n in sites.nodes}
+    layout = cfg.demo_layout
+    reserve = [list(p) for p in layout.reserve] if layout and layout.reserve else None
+    sector_rings = sectors(reserve, [(g.lat, g.lon) for g in sites.gateways]) if reserve else []
 
     @app.get("/api/console/config")
     def console_config():
@@ -61,13 +75,31 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
             "heartbeat_minutes": timing.heartbeat_minutes,
             "missing_after_minutes": timing.missing_after_minutes,
             "demo_speedup": timing.demo_speedup,
+            "reporting_mode": cfg.simulator.reporting_mode,
+            "clear_alarm_enabled": app.state.clear_alarm_enabled,
+            "explicit_heartbeat_minutes": det.explicit_heartbeat_minutes,
+            "explicit_missing_minutes": det.explicit_missing_minutes,
             "map": con.map.model_dump(),
             "features": con.features.model_dump(),
             "positions_are_placeholders": True,
+            "demo_layout": ({
+                "square_size_m": 100, "rows": 3, "columns": 3,
+                "boundary": grid_boundary(layout.centre.lat, layout.centre.lon),
+                "provisional": True,
+                "gateway_range_m": layout.gateway_range_m,
+                "reserve": reserve,
+                "reserve_area_km2": round(polygon_area_m2(reserve) / 1e6, 2) if reserve else None,
+                "sectors": [{"gateway_id": g.gateway_id, "label": g.label, "polygon": ring,
+                             "area_km2": round(polygon_area_m2(ring) / 1e6, 2)}
+                            for g, ring in zip(sites.gateways, sector_rings)],
+            } if layout else None),
+            # Channels that send alerts (configured, not proof of delivery).
+            "alert_channels": list(dict.fromkeys(cfg.notifiers.enabled)),
             "sites": {
                 "nodes": [n.model_dump() for n in sites.nodes],
-                "gateways": [g.model_dump() for g in sites.gateways],
+                "gateways": [{**g.model_dump(), "planned": g.gateway_id not in served} for g in sites.gateways],
                 "centre": sites.centre.model_dump(),
+                "drone": sites.drone.model_dump() if sites.drone else None,
             },
         }
 
@@ -80,11 +112,15 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
             # per open console). A node's last_seen is the time of its newest
             # reading, so that reading is found by an indexed join, not a
             # query per node.
-            node_rows = conn.execute(select(nodes)).all()
+            alarm_id = select(func.max(events.c.id)).where(
+                events.c.dev_eui == nodes.c.dev_eui, events.c.to_state == ALARM
+            ).correlate(nodes).scalar_subquery()
+            node_rows = conn.execute(select(nodes, alarm_id.label('alarm_event_id'))).all()
             latest = {}
+            latest_times = select(readings.c.dev_eui, func.max(readings.c.time).label("time")).group_by(readings.c.dev_eui).subquery()
             for r in conn.execute(
-                select(readings).join(nodes, (readings.c.dev_eui == nodes.c.dev_eui)
-                                      & (readings.c.time == nodes.c.last_seen))
+                select(readings).join(latest_times, (readings.c.dev_eui == latest_times.c.dev_eui)
+                                      & (readings.c.time == latest_times.c.time))
                 .order_by(readings.c.id)
             ):
                 latest[r.dev_eui] = r  # same-time duplicates: the last stored wins
@@ -96,14 +132,18 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
                        readings.c.time >= now - missing_after - 2 * heartbeat)
                 .group_by(readings.c.dev_eui)
             ).all())
-            return node_rows, latest, prev, conn.execute(select(gateways)).all()
+            started = conn.execute(select(console_log.c.time).order_by(console_log.c.id).limit(1)).scalar()
+            return node_rows, latest, prev, conn.execute(select(gateways)).all(), started
 
-        node_rows, latest, prev, gw_rows = query(fetch)
+        node_rows, latest, prev, gw_rows, started = query(fetch)
         node_list = sorted((_node(n, latest.get(n.dev_eui), now) for n in node_rows),
                            key=lambda n: (n["label"]))
         seen = {n["dev_eui"] for n in node_list}
+        unheard_days = _days(now - started) if started is not None else None
         never_seen = [{"dev_eui": s.dev_eui, "label": s.label, "block": s.block,
-                       "lat": s.lat, "lon": s.lon} for s in sites.nodes if s.dev_eui not in seen]
+                       "lat": s.lat, "lon": s.lon, "surveyed": s.surveyed, **_gateway_of(s),
+                       "days_missing": unheard_days}
+                      for s in sites.nodes if s.dev_eui not in seen]
         gw_list = _gateways(gw_rows, now)
 
         alarm = [n for n in node_list if n["state"] == ALARM]
@@ -144,9 +184,11 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
                 "warming_up": len(warming),
                 "gateways_online": sum(g["online"] for g in gw_list),
                 "gateways_total": len(gw_list),
+                "gateways_planned": sum(g["planned"] for g in gw_list),
                 "latest_data_at": max((n["last_seen"] for n in node_list), default=None),
             },
             "blocks": _blocks(node_list),
+            "network_tree": _network_tree(node_list, never_seen, gw_list),
             "map_blocks": _map_blocks(block_shapes, node_list, never_seen),
             "unplaced": _unplaced(node_list),
             "alarm_zones": _alarm_zones(alarm, con.map.alarm_zone_radius_m),
@@ -187,13 +229,23 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
             for r in rows
         ]}
 
+    def _days(silence: timedelta) -> int:
+        """Whole days of silence, in simulated days under DEMO_SPEEDUP."""
+        return max(int(silence.total_seconds() * timing.demo_speedup // 86400), 0)
+
+    def _gateway_of(site) -> dict[str, Any]:
+        gw = sites.gateway(site.gateway_id) if site else None
+        return {"gateway_id": gw.gateway_id if gw else None, "gateway_label": gw.label if gw else None}
+
     def _node(n, r, now: datetime) -> dict[str, Any]:
         site = sites.node(n.dev_eui)
+        missing = now - n.last_seen > (timedelta(minutes=det.explicit_missing_minutes) if n.last_message_type in
+                                       ("HEARTBEAT", "FIRE_ALERT") else missing_after)
         signals = _signals(r) if r is not None and n.state in (WATCH, ALARM) else []
         # The node says it is in alarm mode by sending on the alarm-mode port
         # (its own sensor saw a change). Never guessed from timing. Only
         # meaningful while it is still transmitting.
-        rapid = (r is not None and r.f_port == alarm_port and not now - n.last_seen > missing_after)
+        rapid = (n.last_message_type not in ("HEARTBEAT", "FIRE_ALERT") and r is not None and r.f_port == alarm_port and not now - n.last_seen > missing_after)
         return {
             "dev_eui": n.dev_eui,
             "label": site.label if site else n.name,
@@ -201,11 +253,18 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
             "device_name": n.name,
             "lat": site.lat if site else None,
             "lon": site.lon if site else None,
+            "surveyed": site.surveyed if site else False,
+            **_gateway_of(site),
             "state": n.state,
             "state_since": n.state_since,
             "last_seen": n.last_seen,
+            "last_contact": n.last_seen,
+            "last_message_type": n.last_message_type or "MEASUREMENT",
+            "explicit_fire_active": bool(n.explicit_fire_active),
+            "alarm_event_id": n.alarm_event_id if n.state == ALARM else None,
             "seconds_since_seen": max((now - n.last_seen).total_seconds(), 0.0),
-            "missing": now - n.last_seen > missing_after,
+            "missing": missing,
+            "days_missing": _days(now - n.last_seen) if missing else None,
             "rapid_updates": rapid,
             "battery_v": n.battery_v,
             "rssi": n.last_rssi,
@@ -246,8 +305,10 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
                 "lat": site.lat if site else None,
                 "lon": site.lon if site else None,
                 "last_seen": r.last_seen if r else None,
+                "planned": site is not None and gid not in served,
                 # A gateway relays every node's heartbeat: silent this long means down.
-                "online": r is not None and now - r.last_seen <= missing_after,
+                "online": r is not None and now - r.last_seen <= (timedelta(minutes=det.explicit_missing_minutes)
+                    if r.last_message_type in ("HEARTBEAT", "FIRE_ALERT") else missing_after),
                 "uplinks": r.uplinks if r else 0,
             })
         return out
@@ -263,17 +324,57 @@ def _blocks(node_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if n["state"] not in (WATCH, ALARM):
             continue
         key = n["block"] or n["label"]
-        b = out.setdefault(key, {"block": key, "state": WATCH, "nodes": [], "signals": set()})
+        b = out.setdefault(key, {"block": key, "state": WATCH, "nodes": [], "signals": set(),
+                                 "gateways": set(), "alerting": []})
         if n["state"] == ALARM:
             b["state"] = ALARM
         b["nodes"].append(n["label"])
+        b["alerting"].append({"label": n["label"], "state": n["state"]})  # labels only, no devEUI
         b["signals"] |= set(n["signals"])
+        if n.get("gateway_label"):
+            b["gateways"].add(n["gateway_label"])
     result = []
     for b in sorted(out.values(), key=lambda b: (b["state"] != ALARM, b["block"])):
         b["signals"] = [s for s in order if s in b["signals"]]
+        b["gateways"] = sorted(b["gateways"])
         b["line"] = " - ".join([f"Block {b['block']}", *b["signals"]])
         result.append(b)
     return result
+
+
+def _network_tree(node_list: list[dict[str, Any]], never_seen: list[dict[str, Any]],
+                  gw_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Gateways -> clusters -> nodes, for the console's drill-down panel:
+    [{"gateway_id", "label", "online", "state", "nodes", "in_alarm", "missing",
+      "clusters": [{"cluster", "state", "nodes": [dev_eui...], "in_alarm",
+                    "missing", "alerting": [labels]}]}]
+    A state is the worst of the nodes below it; a never-reported node counts
+    as NEVER. Nodes without a site gateway are left out (they are not on the map)."""
+    rank = {s: i for i, s in enumerate(BLOCK_STATE_ORDER + ["NEVER"])}
+    worst = lambda states: min(states, key=lambda s: rank.get(s, len(rank))) if states else "NEVER"
+    members = [(n, _node_map_state(n)) for n in node_list] + [(n, "NEVER") for n in never_seen]
+    tree = []
+    for g in gw_list:
+        mine = [(n, st) for n, st in members if n.get("gateway_id") == g["gateway_id"]]
+        clusters: dict[str, list] = {}
+        for n, st in mine:
+            clusters.setdefault(n["block"] or n["label"], []).append((n, st))
+        cl = [{
+            "cluster": name,
+            "state": worst([st for _, st in ns]),
+            "nodes": [n["dev_eui"] for n, _ in sorted(ns, key=lambda x: x[0]["label"])],
+            "in_alarm": sum(st == ALARM for _, st in ns),
+            "missing": sum(bool(n.get("missing")) for n, _ in ns),
+            "alerting": sorted(n["label"] for n, st in ns if st in (ALARM, WATCH)),
+        } for name, ns in sorted(clusters.items())]
+        tree.append({
+            "gateway_id": g["gateway_id"], "label": g["label"], "online": g["online"],
+            "planned": g.get("planned", False),
+            "state": worst([st for _, st in mine]),
+            "nodes": len(mine), "in_alarm": sum(c["in_alarm"] for c in cl),
+            "missing": sum(c["missing"] for c in cl), "clusters": cl,
+        })
+    return tree
 
 
 def _block_shapes(site_nodes, radius_m: float) -> dict[str, dict[str, Any]]:
