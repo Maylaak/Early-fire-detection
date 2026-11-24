@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import Connection, Engine, and_, select
 from sqlalchemy.exc import DBAPIError
@@ -100,9 +100,11 @@ def create_app(
     def node_page(dev_eui: str):
         return page("node.html")
 
+    # The event log is back-end only (/api/events, the database, the service
+    # window). The old history page now leads back to the console.
     @app.get("/alarms", include_in_schema=False)
     def alarms_page():
-        return page("alarms.html")
+        return RedirectResponse("/", status_code=307)
 
     # --- API ---------------------------------------------------------------
 

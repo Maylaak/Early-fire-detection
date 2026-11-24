@@ -137,6 +137,11 @@ function initMap() {
     initReserve();
     L.polygon(CC.demo_layout.boundary, { color: "#91c6cf", weight: 1, dashArray: "5 5",
       fill: true, fillColor: "#6cb2c1", fillOpacity: 0.07, interactive: false }).addTo(map);
+    // One square per node (cell_size_m each), the node at its centre.
+    for (const cell of CC.demo_layout.cells || []) {
+      L.polygon(cell, { color: "#91c6cf", weight: 1, opacity: 0.45, dashArray: "2 4", fill: false,
+        interactive: false, className: "grid-cell" }).addTo(map);
+    }
     initNetwork();
     initClusterLinks();
     const entities = [...CC.sites.nodes, ...CC.sites.gateways, c, CC.sites.drone].filter(Boolean);
@@ -355,9 +360,11 @@ function focusMap(gw, cluster) {
   const own = [...clusterGeo.values()].filter(c => c.gw === mapFocus.gw);
   if (mapFocus.cluster) {
     // Cluster: outline its nodes and zoom in far enough to show each one.
-    const pts = clusterGeo.get(`${gw}|${cluster}`).pts, pad = 0.00012;
+    // Outline the cluster's own cells: half a cell beyond its outer nodes.
+    const pts = clusterGeo.get(`${gw}|${cluster}`).pts, half = (CC.demo_layout?.cell_size_m || 33) / 2;
+    const padLat = half / 111195, padLon = half / (111195 * Math.cos(pts[0][0] * Math.PI / 180));
     const lats = pts.map(p => p[0]), lons = pts.map(p => p[1]);
-    const [s, n, w, e] = [Math.min(...lats) - pad, Math.max(...lats) + pad, Math.min(...lons) - pad, Math.max(...lons) + pad];
+    const [s, n, w, e] = [Math.min(...lats) - padLat, Math.max(...lats) + padLat, Math.min(...lons) - padLon, Math.max(...lons) + padLon];
     L.polygon([[s, w], [n, w], [n, e], [s, e]], { color: "#ffe36e", weight: 2, dashArray: "4 4", fill: false,
       interactive: false, className: "cluster-focus" }).addTo(layers.focus);
     flyToPoints(pts, detailZoom(), 99);

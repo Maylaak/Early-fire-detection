@@ -347,7 +347,8 @@ web:
 # Reserve: the outline of the grid in the team's "Pilot scale project
 # location" figure, traced onto satellite imagery (about 2.2 x 1.6 km,
 # 2.6 km2; accurate to roughly +-50 m). The pilot grid sits on the highlighted
-# square of that figure: a 100 m square, 3 x 3 cells, 33.3 m apart. Cell
+# square of that figure: 3 x 3 cells of 33 x 33 m (a 99 m square), one node
+# at the centre of each cell, so neighbouring nodes are 33 m apart. Cell
 # assignment: sorted devEUI, NW to SE.
 #
 # Gateways: five, placed so every point of the reserve is as close as

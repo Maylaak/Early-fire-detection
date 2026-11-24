@@ -212,8 +212,10 @@ Stops the containers and **deletes the database** (fresh start).
 `http://127.0.0.1:8000/` is a dark, two-column console meant to stay open on
 a control-room screen.
 
-- **Top bar**: centre name, the **status pill**, date and time, link to
-  **Alarm history**. The browser tab title gets a `[FIRE ALARM]` prefix.
+- **Top bar**: centre name, the **status pill**, date and time. The browser
+  tab title gets a `[FIRE ALARM]` prefix. The event log is not shown to
+  operators: it stays in the database, in `GET /api/events`, and in the
+  detection service window.
 
   | Pill | Meaning |
   |---|---|

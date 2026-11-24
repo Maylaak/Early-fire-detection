@@ -6,7 +6,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from gateway.config import DEFAULT_CONFIG_PATH, load_config
-from gateway.geometry import grid_boundary, grid_positions
+from gateway.geometry import grid_boundary, grid_cells, grid_positions
 from gateway.web.app import create_app
 
 
@@ -34,13 +34,25 @@ def test_grid_cell_centres_and_extent(lat, lon):
     for i, point in enumerate(points):
         east, north = local_offsets(dict(lat=lat,lon=lon), point)
         row, col = divmod(i,3)
-        assert east == pytest.approx(-50+(col+0.5)*100/3, abs=0.001)
-        assert north == pytest.approx(50-(row+0.5)*100/3, abs=0.001)
+        assert east == pytest.approx((col-1)*33, abs=0.001)
+        assert north == pytest.approx((1-row)*33, abs=0.001)
+    # Neighbouring nodes, across and down, are exactly 33 m apart.
+    for i in range(9):
+        row, col = divmod(i,3)
+        if col < 2: assert distance(points[i],points[i+1]) == pytest.approx(33,abs=0.001)
+        if row < 2: assert distance(points[i],points[i+3]) == pytest.approx(33,abs=0.001)
     corners = [dict(lat=p[0],lon=p[1]) for p in grid_boundary(lat,lon)]
     for a,b in zip(corners,corners[1:]+corners[:1]):
-        assert distance(a,b) == pytest.approx(100,abs=0.001)
-    # Extreme sensor centres span 66.67 m; the enclosing square spans 100 m.
-    assert distance(points[0],points[2]) == pytest.approx(200/3,abs=0.001)
+        assert distance(a,b) == pytest.approx(99,abs=0.001)
+    # Each node is the centre of its own 33 x 33 m cell.
+    for point, cell in zip(points, grid_cells(lat,lon)):
+        c = [dict(lat=p[0],lon=p[1]) for p in cell]
+        for a,b in zip(c,c[1:]+c[:1]):
+            assert distance(a,b) == pytest.approx(33,abs=0.001)
+        offs = [local_offsets(point,q) for q in c]
+        assert sum(e for e,_ in offs) == pytest.approx(0,abs=0.001)
+        assert sum(n for _,n in offs) == pytest.approx(0,abs=0.001)
+        assert all(abs(e) == pytest.approx(16.5,abs=0.001) and abs(n) == pytest.approx(16.5,abs=0.001) for e,n in offs)
 
 
 def test_shipped_layout_identity_and_offsets():
@@ -90,7 +102,7 @@ def test_configurable_layout_and_reordered_registry(tmp_path):
     cfg=load_config(path,env={})
     origin=cfg.demo_layout.centre.model_dump()
     assert local_offsets(origin,cfg.sites.gateways[0].model_dump()) == pytest.approx((0,-750),abs=0.001)
-    assert local_offsets(origin,cfg.sites.node('70b3d57ed0000001').model_dump()) == pytest.approx((-100/3,100/3),abs=0.001)
+    assert local_offsets(origin,cfg.sites.node('70b3d57ed0000001').model_dump()) == pytest.approx((-33,33),abs=0.001)
     assert cfg.console.map.centre_lat==60
 
 
@@ -100,7 +112,8 @@ def test_layout_console_contract(engine):
         response=client.get('/api/console/config')
         assert response.status_code==200
         data=response.json()
-        assert data['demo_layout']['square_size_m']==100
+        assert data['demo_layout']['square_size_m']==99 and data['demo_layout']['cell_size_m']==33
+        assert len(data['demo_layout']['cells'])==9
         assert len(data['sites']['nodes'])==9
         for role in ('drone','centre'):
             entity=data['sites'][role]

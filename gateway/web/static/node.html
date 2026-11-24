@@ -12,7 +12,7 @@
       <h1>{{centre_title}}</h1>
       <p>{{centre_subtitle}}</p>
     </div>
-    <nav><a href="/">Operator console</a><a href="/alarms">Alarm history</a></nav>
+    <nav><a href="/">Operator console</a></nav>
     <span class="updated" id="updated"></span>
   </header>
   <div id="banners"></div>
@@ -56,13 +56,6 @@
     </div>
     <p class="thresholds" id="thresholds"></p>
 
-    <h2>Events for this node</h2>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Time</th><th>Event</th><th>Message</th></tr></thead>
-        <tbody id="events"></tbody>
-      </table>
-    </div>
   </main>
   <script src="/static/common.js"></script>
   <script src="/static/charts.js"></script>
@@ -97,10 +90,9 @@
       document.querySelectorAll("#range button").forEach(b =>
         b.classList.toggle("active", +b.dataset.h === hours));
 
-      const [status, data, evs] = await Promise.all([
+      const [status, data] = await Promise.all([
         getJSON("/api/status"),
         getJSON(`/api/nodes/${encodeURIComponent(devEui)}/readings?hours=${hours}`),
-        getJSON(`/api/events?kind=all&limit=50&dev_eui=${encodeURIComponent(devEui)}`),
       ]);
       const n = data.node;
       const label = labelOf(n.dev_eui, n.name);
@@ -119,10 +111,6 @@
         `WATCH when gas is ${cfg.watch.gas_drop_pct}% below baseline AND (temperature +${cfg.watch.temperature_rise_c} C or humidity -${cfg.watch.humidity_drop_pct} pts). ` +
         `ALARM at ${cfg.alarm.gas_drop_pct}% AND (+${cfg.alarm.temperature_rise_c} C or -${cfg.alarm.humidity_drop_pct} pts).`;
 
-      document.getElementById("events").innerHTML = evs.events.length ? evs.events.map(e => `
-        <tr><td>${esc(fmtTime(e.time))}</td><td>${badge(e.to_state || e.kind)}</td>
-        <td class="msg">${esc(e.message)}</td></tr>`).join("")
-        : `<tr><td colspan="3" class="empty">No events yet</td></tr>`;
     }
 
     document.getElementById("range").addEventListener("click", ev => {

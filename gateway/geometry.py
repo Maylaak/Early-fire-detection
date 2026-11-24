@@ -20,15 +20,31 @@ def offset_position(lat: float, lon: float, east_m: float, north_m: float) -> di
                        math.degrees(math.atan2(east_m, north_m)))
 
 
+# Pilot grid: 3 x 3 cells of 33 m, one node at the centre of each, so
+# neighbouring nodes are 33 m apart and the whole grid is a 99 m square.
+CELL_M = 33.0
+GRID_M = 3 * CELL_M
+
+
 def grid_positions(lat: float, lon: float) -> list[dict[str, float]]:
-    """Nine cell centres, north-to-south then west-to-east, in a 100 m square."""
-    return [offset_position(lat, lon, (col - 1) * 100 / 3, (1 - row) * 100 / 3)
+    """Nine cell centres, north-to-south then west-to-east, CELL_M apart."""
+    return [offset_position(lat, lon, (col - 1) * CELL_M, (1 - row) * CELL_M)
             for row in range(3) for col in range(3)]
 
 
+def _square(lat: float, lon: float, east: float, north: float, half: float) -> list[list[float]]:
+    return [list(offset_position(lat, lon, east + e, north + n).values())
+            for e, n in [(-half, half), (half, half), (half, -half), (-half, -half)]]
+
+
 def grid_boundary(lat: float, lon: float) -> list[list[float]]:
-    return [list(offset_position(lat, lon, e, n).values())
-            for e, n in [(-50, 50), (50, 50), (50, -50), (-50, -50)]]
+    return _square(lat, lon, 0, 0, GRID_M / 2)
+
+
+def grid_cells(lat: float, lon: float) -> list[list[list[float]]]:
+    """The nine CELL_M squares, each centred on its node's planned position."""
+    return [_square(lat, lon, (col - 1) * CELL_M, (1 - row) * CELL_M, CELL_M / 2)
+            for row in range(3) for col in range(3)]
 
 
 def _local(lat0: float, lon0: float):

@@ -53,11 +53,11 @@ def client(engine):
 
 
 def test_pages_are_served(client):
-    for path in ["/", "/node/70b3d57ed0000003", "/alarms", "/static/charts.js", "/static/style.css"]:
+    for path in ["/", "/node/70b3d57ed0000003", "/static/charts.js", "/static/style.css"]:
         r = client.get(path)
         assert r.status_code == 200, path
     # Every page names the centre from config.yaml, not a generic product name.
-    for path in ["/", "/node/70b3d57ed0000003", "/alarms"]:
+    for path in ["/", "/node/70b3d57ed0000003"]:
         text = client.get(path).text
         assert CFG.console.title in text, path
         assert "Wildfire gateway" not in text and "{{" not in text, path
@@ -148,3 +148,16 @@ def test_read_only_engine_is_used_by_default(tmp_path):
     cfg = CFG.model_copy(update={"database": CFG.database.model_copy(update={"web_url": url})})
     client = TestClient(create_app(cfg, clock=lambda: START + timedelta(minutes=5)))
     assert len(client.get("/api/status").json()["nodes"]) == 2
+
+
+def test_event_log_is_back_end_only(client):
+    """No page shows or links to the event log; the API still serves it."""
+    r = client.get("/alarms", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/"
+    for path in ["/", "/node/70b3d57ed0000003"]:
+        text = client.get(path).text
+        assert "/alarms" not in text and "Alarm history" not in text, path
+        assert "/api/events" not in text and "Events for this node" not in text, path
+    for path in ["/static/console.js", "/static/common.js"]:
+        assert "/api/events" not in client.get(path).text, path
+    assert client.get("/api/events").status_code == 200

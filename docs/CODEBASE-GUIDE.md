@@ -95,8 +95,7 @@ Top level
 | `gateway/web/static/common.js` | Helpers shared by all pages: `getJSON`, formatting, badges, the banner, polling. |
 | `gateway/web/static/node.html` | Node detail page: charts of one node's readings and its events. |
 | `gateway/web/static/charts.js` | A small hand-written SVG line-chart library used by `node.html`. |
-| `gateway/web/static/alarms.html` | Event history page (alarms, connectivity, all). |
-| `gateway/web/static/style.css` | Styles for `node.html` and `alarms.html`. |
+| `gateway/web/static/style.css` | Styles for `node.html`. |
 | `gateway/web/static/vendor/leaflet/` | Leaflet 1.9.4 map library (JS, CSS, licence), stored in the repo so the console works without a CDN. |
 | `gateway/web/static/vendor/markercluster/` | Leaflet.markercluster 1.5.3 (groups nearby markers into a count badge): JS, its core CSS, licence. The plugin's default badge stylesheet is not included, because the console draws its own badges (`clusterIcon` in `console.js`). |
 

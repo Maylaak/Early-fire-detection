@@ -40,7 +40,7 @@ from fastapi import FastAPI, Query
 from sqlalchemy import Connection, func, select
 
 from gateway.config import Config
-from gateway.geometry import grid_boundary, polygon_area_m2, sectors
+from gateway.geometry import CELL_M, GRID_M, grid_boundary, grid_cells, polygon_area_m2, sectors
 from gateway.db import console_log, events, gateways, nodes, readings
 
 ALARM, WATCH, WARMUP = "ALARM", "WATCH", "WARMUP"
@@ -83,8 +83,9 @@ def add_console_routes(app: FastAPI, cfg: Config, query: Callable[[Callable[[Con
             "features": con.features.model_dump(),
             "positions_are_placeholders": True,
             "demo_layout": ({
-                "square_size_m": 100, "rows": 3, "columns": 3,
+                "square_size_m": GRID_M, "cell_size_m": CELL_M, "rows": 3, "columns": 3,
                 "boundary": grid_boundary(layout.centre.lat, layout.centre.lon),
+                "cells": grid_cells(layout.centre.lat, layout.centre.lon),
                 "provisional": True,
                 "gateway_range_m": layout.gateway_range_m,
                 "reserve": reserve,
