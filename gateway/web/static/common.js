@@ -52,8 +52,14 @@ function fmt(v, digits = 1) {
   return v === null || v === undefined || Number.isNaN(v) ? "-" : Number(v).toFixed(digits);
 }
 
+// Operator wording for each state, in sentence case.
+const STATE_LABEL = { ALARM: "Fire alarm", WATCH: "Watch", NORMAL: "Normal", WARMUP: "Warming up",
+  MISSING: "Missing", NEVER: "No contact", NO_DATA: "No data", PLANNED: "Planned",
+  ONLINE: "Online", OFFLINE: "Offline" };
+const stateLabel = st => STATE_LABEL[st] || st;
+
 function badge(state) {
-  return `<span class="badge ${esc(state)}">${esc(state)}</span>`;
+  return `<span class="badge ${esc(state)}">${esc(stateLabel(state))}</span>`;
 }
 
 // Banners shown on every page. A fire alarm must be impossible to miss.

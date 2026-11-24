@@ -112,11 +112,12 @@ td.msg { white-space: normal; min-width: 320px; }
 /* --- state badges --- */
 .badge {
   display: inline-block;
-  padding: 2px 9px;
-  border-radius: 999px;
+  padding: 0 8px;
+  border-radius: 3px;
+  border: 1px solid transparent;
   font-size: 12px;
-  font-weight: 700;
-  letter-spacing: .03em;
+  font-weight: 600;
+  line-height: 1.7;
 }
 .badge.NORMAL { background: var(--normal-bg); color: var(--normal); }
 .badge.WATCH { background: var(--watch-bg); color: var(--watch); }

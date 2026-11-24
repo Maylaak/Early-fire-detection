@@ -49,7 +49,7 @@ const status = nodes => ({ nodes, network_tree: [{ gateway_id: 'gw', clusters: [
   const alarm = status([node('1', { state: 'ALARM', alarm_event_id: 7 }), node('2', { missing: true, days_missing: 3 })]);
   ctx.desktopAlerts.update(alarm); ctx.desktopAlerts.update(alarm);
   assert.equal(shown.length, 1);
-  assert.equal(shown[0].title, 'FIRE ALARM - F-07-01');
+  assert.equal(shown[0].title, 'Fire alarm: F-07-01');
   assert.match(shown[0].opts.body, /Cluster F-07 · GW-01/);
   assert.equal(shown[0].opts.requireInteraction, true);
   // F-07-02 was already missing when the page opened: no notification for it.

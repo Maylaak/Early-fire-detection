@@ -28,8 +28,8 @@ const alarm={...CC.sites.nodes[0],state:'ALARM',missing:true,last_seen:null};
 const status={nodes:[alarm],never_seen:CC.sites.nodes.slice(1),unplaced:{count:0,alerting:[]},alarm_zones:[],gateways:[{gateway_id:'GW',label:'<gateway>',lat:0,lon:1,online:false,last_seen:null}]};
 drawMap(status);
 assert.equal(nodeMarkers.size,9);assert.equal(alarmMarkers.size,1);
-assert(networkMarker.options.icon.html.includes('1 FIRE ALARM'));
-assert(networkMarker.options.icon.html.includes('8 never seen'));
+assert(networkMarker.options.icon.html.includes('1 in fire alarm'));
+assert(networkMarker.options.icon.html.includes('8 not yet heard'));
 assert(map.hasLayer(layers.alarms));
 const gateway=gatewayMarkers.get('GW'),node=nodeMarkers.get('0'),summary=networkMarker;
 for(let i=0;i<30;i++) {map.zoom=i%2?18:15;applyDetail();drawMap(status);}
@@ -51,10 +51,10 @@ assert.equal(alarmRadiusMeters(),15);
 for (const z of layers.zones.items) { assert.equal(z.options.radius,15); assert.equal(z.options.stroke,false); assert.equal(z.options.interactive,false); }
 assert([...layers.coverage.items].some(l=>l.content?.includes('&lt;test&gt;')));
 map.zoom=15;applyDetail();assert(!map.hasLayer(layers.zones));
-assert(map.hasLayer(layers.alarms));assert(networkMarker.options.icon.html.includes('1 FIRE ALARM'));
+assert(map.hasLayer(layers.alarms));assert(networkMarker.options.icon.html.includes('1 in fire alarm'));
 status.nodes = [{...alarm, state:'NORMAL',missing:false}];status.gateways=[];
 drawMap(status);assert.equal(alarmMarkers.size,0);assert.equal(gatewayMarkers.size,0);
-assert.equal(layers.gateways.items.size,0);assert(!networkMarker.options.icon.html.includes('FIRE ALARM'));
+assert.equal(layers.gateways.items.size,0);assert(!networkMarker.options.icon.html.includes('fire alarm'));
 status.nodes = CC.sites.nodes.map(n => ({...n,state:'ALARM',missing:true}));
 for (const zoom of [18,19,18,15,19]) {
   map.zoom=zoom;applyDetail();drawMap(status);
@@ -108,7 +108,7 @@ assert(map.getZoom()>=detailZoom() && map.hasLayer(layers.nodes),'a cluster zoom
 assert.equal(layers.focus.items.size,1); assert(mapCrumbs.innerHTML.includes('Cluster F-08'));
 assert(chip.options.icon.html.includes('selected'));
 lastTree=[{gateway_id:'GW',clusters:[{cluster:'F-07',state:'ALARM'}]}]; drawClusterChips();
-assert(clusterGeo.get('GW|F-07').chip.options.icon.html.includes('FIRE ALARM'));
+assert(clusterGeo.get('GW|F-07').chip.options.icon.html.includes('Fire alarm'));
 openNetwork('P',null);
 assert.equal(map.getZoom(),detailZoom()-1); assert.equal(layers.focus.items.size,0);
 assert.equal(layers.clusterTags.items.size,0,'a planned gateway has no clusters');

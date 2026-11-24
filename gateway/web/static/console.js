@@ -12,8 +12,8 @@ const MISSING_COLOR = "#6e7886";
 const STATE_RANK = ["ALARM", "WATCH", "MISSING", "WARMUP", "NORMAL", "NO_DATA", "NEVER"];
 const rankOf = st => { const i = STATE_RANK.indexOf(st); return i < 0 ? STATE_RANK.length : i; };
 const worstOf = states => states.reduce((a, b) => (rankOf(b) < rankOf(a) ? b : a), "NEVER");
-const PILL_TEXT = { FIRE_ALARM: "FIRE ALARM", WATCH: "WATCH", ALL_CLEAR: "ALL CLEAR", NO_DATA: "NO DATA",
-                    WARMING_UP: "WARMING UP" };
+const PILL_TEXT = { FIRE_ALARM: "Fire alarm", WATCH: "Watch", ALL_CLEAR: "All clear", NO_DATA: "No data received",
+                    WARMING_UP: "Warming up" };
 const BASE_TITLE = document.title;
 // Shown only while a node is in alarm-mode transmission (never on its normal heartbeat).
 const RAPID_TIP = "This node's own sensor noticed a change, so it is now reporting every minute " +
@@ -157,6 +157,18 @@ function initMap() {
     return el;
   };
   legend.addTo(map);
+  // Back to the whole site, from any zoom or drill-down level.
+  const reset = L.control({ position: "topleft" });
+  reset.onAdd = () => {
+    const el = L.DomUtil.create("button", "leaflet-bar map-reset");
+    el.type = "button";
+    el.title = "Show the whole site";
+    el.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg>Reset view';
+    L.DomEvent.disableClickPropagation(el);
+    el.onclick = () => openNetwork(null, null);
+    return el;
+  };
+  reset.addTo(map);
   const crumbs = L.control({ position: "topleft" });
   crumbs.onAdd = () => {
     const el = L.DomUtil.create("nav", "map-crumbs");
@@ -287,7 +299,7 @@ const sectorShapes = new Map();  // gateway_id -> { ring, shape }
 let siteView = null, mapCrumbs = null, lastTree = [];
 
 function chipIcon(block, count, state, selected) {
-  const what = { ALARM: "FIRE ALARM", WATCH: "WATCH", MISSING: "missing", NEVER: "no contact" }[state];
+  const what = { ALARM: "Fire alarm", WATCH: "Watch", MISSING: "missing", NEVER: "no contact" }[state];
   return L.divIcon({ className: "anchor-icon", iconSize: [0, 0],
     html: `<button type="button" class="cluster-chip ${esc(state)}${selected ? " selected" : ""}"><b>Cluster ${esc(block)}</b>` +
           `<small>${count} nodes${what ? ` · ${what}` : ""}</small></button>` });
@@ -356,14 +368,17 @@ function focusMap(gw, cluster) {
     flyToPoints(pts, 0, detailZoom() - 1);
   } else if (siteView) {
     map.fitBounds(siteView.bounds, { ...siteView.options, animate: !reducedMotion() });
+  } else {
+    map.setView([CC.map.centre_lat, CC.map.centre_lon], CC.map.zoom, { animate: !reducedMotion() });
   }
   applyDetail(true);
   renderMapCrumbs();
 }
 
 function networkIcon(state, status) {
-  return L.divIcon({ className: "network-anchor", iconSize: [220,70], iconAnchor: [110,85],
-    html: `<div class="network-summary ${esc(state)}"><span class="network-glyph" aria-hidden="true">▦</span><div><strong>Sensor Network — ${CC.sites.nodes.length} Nodes</strong><small>${esc(status)}</small><em>Inspect grid ↗</em></div></div>` });
+  return L.divIcon({ className: "network-anchor", iconSize: [220,70], iconAnchor: [110,100],
+    html: `<div class="network-summary ${esc(state)}"><div class="ns-head"><strong>Sensor network</strong>` +
+          `<span>${CC.sites.nodes.length} nodes</span></div><small>${esc(status)}</small><em>Select to view the grid</em></div>` });
 }
 
 function updateNetwork(status) {
@@ -373,9 +388,9 @@ function updateNetwork(status) {
   const alarm = observed.filter(n => n.state === "ALARM").length;
   const watch = observed.filter(n => n.state === "WATCH").length;
   const missing = observed.filter(n => n.missing).length;
-  const text = [alarm ? `${alarm} FIRE ALARM` : null, watch ? `${watch} WATCH` : null,
+  const text = [alarm ? `${alarm} in fire alarm` : null, watch ? `${watch} on watch` : null,
     `${observed.length-missing} reporting`, missing ? `${missing} missing` : null,
-    observed.length < ids.size ? `${ids.size-observed.length} never seen` : null].filter(Boolean).join(" · ");
+    observed.length < ids.size ? `${ids.size-observed.length} not yet heard` : null].filter(Boolean).join(" · ");
   const state = worstOf(observed.map(nodeMapState));
   const signature = state + text;
   if (signature !== networkSignature) {
@@ -643,7 +658,7 @@ function setPill(pill, note) {
   const el = document.getElementById("pill");
   el.className = `pill ${pill}`;
   document.getElementById("pill-text").textContent = pill === "ALL_CLEAR" && CC.reporting_mode === "event_driven"
-    ? "NO FIRE REPORTED" : PILL_TEXT[pill] || pill;
+    ? "No fire reported" : PILL_TEXT[pill] || pill;
   document.getElementById("pill-note").textContent = note || "";
   document.title = pill === "FIRE_ALARM" ? `[FIRE ALARM] ${BASE_TITLE}`
     : pill === "WATCH" ? `[WATCH] ${BASE_TITLE}` : BASE_TITLE;
@@ -654,9 +669,9 @@ function renderStatus(s) {
   const net = s.network;
   let note = s.pill_note;
   if (s.pill === "FIRE_ALARM") note = s.blocks.filter(b => b.state === "ALARM")
-    .map(b => `Cluster ${b.block}${b.gateways?.length ? ` · ${b.gateways.join(", ")}` : ""}`).join("; ") + " · press for nodes";
-  if (s.pill === "NO_DATA") note = net.latest_data_at ? `nothing heard for ${fmtAgo(net.latest_data_at).replace(" ago", "")}` : "no node has reported yet";
-  if (s.pill === "WARMING_UP") note = "learning baselines - not yet detecting fire";
+    .map(b => `Cluster ${b.block}${b.gateways?.length ? ` · ${b.gateways.join(", ")}` : ""}`).join("; ") + " · select to view";
+  if (s.pill === "NO_DATA") note = net.latest_data_at ? `Last transmission received ${fmtAgo(net.latest_data_at)}` : "No transmissions received yet";
+  if (s.pill === "WARMING_UP") note = "Learning baselines; fire detection not yet active";
   setPill(s.pill, note);
 
   const tw = document.getElementById("timing-warn");
@@ -676,8 +691,8 @@ function renderStatus(s) {
     const gw = s.network_tree.find(g => g.clusters.some(c => c.cluster === b.block));
     const who = b.alerting.map(a => `${esc(a.label)}${a.state === "WATCH" ? " (watch)" : ""}`).join(", ");
     return `<button type="button" class="block-line ${esc(b.state)}" data-gw="${esc(gw?.gateway_id || "")}" data-cluster="${esc(b.block)}">
-      ${b.state === "ALARM" ? "FIRE ALARM" : "WATCH"} · Cluster ${esc(b.block)} · ${esc(b.gateways.join(", ") || "no gateway")}
-      <small>Registered by ${who}${b.signals.length ? ` · ${esc(b.signals.join(", "))}` : ""} · press to show</small></button>`;
+      ${b.state === "ALARM" ? "Fire alarm" : "Watch"} · Cluster ${esc(b.block)} · ${esc(b.gateways.join(", ") || "no gateway")}
+      <small>Registered by ${who}${b.signals.length ? ` · ${esc(b.signals.join(", "))}` : ""} · select to view</small></button>`;
   }).join("");
 
   lastStatus = s;
@@ -708,7 +723,7 @@ function renderPhase2() {
     const on = CC.features[p.dataset.feature];
     p.classList.toggle("enabled", on);
     p.querySelector(".phase2-body").textContent = on
-      ? "ENABLED - NO DATA SOURCE CONFIGURED" : "NOT CONNECTED - PLANNED PHASE 2";
+      ? "Enabled · no data source configured" : "Not connected · planned for phase 2";
   });
 }
 
@@ -726,10 +741,7 @@ function openNetwork(gw, cluster) {
   focusMap(netView.gw, netView.cluster);
 }
 
-function stateTag(st) {
-  return { ALARM: "FIRE ALARM", WATCH: "WATCH", MISSING: "MISSING", WARMUP: "WARMING UP",
-           NORMAL: "NORMAL", NO_DATA: "NO DATA", NEVER: "NO CONTACT", PLANNED: "PLANNED" }[st] || st;
-}
+const stateTag = stateLabel;
 
 function card(cls, state, attrs, title, detail) {
   return `<button type="button" class="net-card ${cls} ${esc(state)}" ${attrs}>
@@ -739,7 +751,8 @@ function card(cls, state, attrs, title, detail) {
 }
 
 function missingBadge(n) {
-  return `<span class="badge MISSING">${esc(daysText(n.days_missing).toUpperCase())}</span>`;
+  const t = daysText(n.days_missing);
+  return `<span class="badge MISSING">${esc(t[0].toUpperCase() + t.slice(1))}</span>`;
 }
 
 function nodeRow(n) {
@@ -781,7 +794,7 @@ function renderNetwork() {
       card("gw", g.state, `data-gw="${esc(g.gateway_id)}"`,
       `${esc(g.label)} <span class="muted">· ${g.online ? "online" : "offline"}</span>`,
       `${g.clusters.length} cluster${g.clusters.length === 1 ? "" : "s"} · ${g.nodes} nodes` +
-      (g.in_alarm ? ` · <strong class="hot">FIRE ALARM in cluster ${esc(g.clusters.filter(c => c.in_alarm).map(c => c.cluster).join(", "))}</strong>` : "") +
+      (g.in_alarm ? ` · <strong class="hot">Fire alarm in cluster ${esc(g.clusters.filter(c => c.in_alarm).map(c => c.cluster).join(", "))}</strong>` : "") +
       (g.missing ? ` · ${g.missing} missing` : "") + " · press for clusters")).join("");
   } else if (!cl) {
     view.innerHTML = gw.clusters.map(c => card("cluster", c.state, `data-gw="${esc(gw.gateway_id)}" data-cluster="${esc(c.cluster)}"`,
@@ -1012,7 +1025,7 @@ const desktopAlerts = (() => {
       const key = `${n.dev_eui}:${n.alarm_event_id}`;
       if (n.state === "ALARM" && !alarmsSeen.has(key)) {
         alarmsSeen.add(key);
-        if (active()) show(`FIRE ALARM - ${n.label}`,
+        if (active()) show(`Fire alarm: ${n.label}`,
           `Cluster ${n.block || "-"} · ${n.gateway_label || "no gateway"}\nGPS ${fmtGPS(n.lat, n.lon)}`,
           `alarm-${key}`, true, gwOf(n.dev_eui)?.gateway_id, n.block);
       }
@@ -1051,7 +1064,7 @@ function showConn(err) {
   if (!err) { el.hidden = true; return; }
   el.hidden = false;
   el.textContent = `Cannot load data: ${err.message} (retrying)`;
-  setPill("NO_DATA", "console cannot reach the database");
+  setPill("NO_DATA", "Database connection unavailable");
 }
 
 window.addEventListener('alarm-cleared', async () => {
