@@ -2,7 +2,7 @@
 
 function clearAlarmButton(node, enabled) {
   if (!enabled || node.state !== 'ALARM' || !Number.isSafeInteger(node.alarm_event_id)) return '';
-  return `<button type="button" class="clear-alarm" data-node="${esc(node.dev_eui)}" data-alarm="${node.alarm_event_id}" data-label="${esc(node.label)}">Clear Alarm</button>`;
+  return `<button type="button" class="clear-alarm" data-node="${esc(node.dev_eui)}" data-alarm="${node.alarm_event_id}" data-label="${esc(node.label)}">Clear alarm</button>`;
 }
 
 // Token exists only in the password input/request, never localStorage or a URL.

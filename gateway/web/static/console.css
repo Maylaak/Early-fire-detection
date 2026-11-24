@@ -16,8 +16,10 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html { height: 100%; }
+/* Header, then the main grid taking whatever height is left (at least). */
 body.console {
+  display: flex; flex-direction: column; min-height: 100vh;
   margin: 0;
   background: var(--bg);
   color: var(--text);
@@ -70,7 +72,9 @@ h2 { margin: 0; font-size: 12px; letter-spacing: .06em; font-weight: 600; color:
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);   /* ~60 / 40 */
   gap: 12px;
   padding: 12px;
-  height: calc(100vh - 66px);
+  /* Fill the window, but grow (and let the page scroll) rather than squeeze
+     the node list when the window is short or an alarm line appears. */
+  flex: 1 0 auto;
 }
 .col-left, .col-right { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
@@ -117,12 +121,12 @@ h2 { margin: 0; font-size: 12px; letter-spacing: .06em; font-weight: 600; color:
 .block-line.WATCH { background: rgba(242, 178, 58, .14); color: var(--watch); border-left: 4px solid var(--watch); }
 
 /* Drill-down: gateways, then clusters, then nodes. */
-#network { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#network { flex: 1; display: flex; flex-direction: column; }
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 2px 0 8px; font-size: 13px; color: var(--muted); }
 .crumbs button { font: inherit; background: none; border: 0; padding: 2px 4px; color: var(--gateway); cursor: pointer; border-radius: 4px; }
 .crumbs button[aria-current="page"] { color: var(--text); font-weight: 600; cursor: default; }
 .crumbs button:hover:not([aria-current]) { text-decoration: underline; }
-.net-view { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+.net-view { flex: 1; min-height: 240px; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
 .net-card { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; cursor: pointer;
   font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line);
   border-left: 4px solid var(--clear); border-radius: 6px; padding: 8px 10px; }
@@ -346,6 +350,7 @@ table.nodes tr.WATCH td:first-child { box-shadow: inset 3px 0 var(--watch); }
 .clear-actions button { cursor: pointer; padding: 8px 16px; }
 .clear-actions button:disabled { cursor: wait; opacity: .6; }
 .clear-notice { margin: 0 16px 12px; }
+.clear-notice:empty { display: none; }
 
 /* Reset view: below the zoom buttons, same look as the Layers control. */
 .map-reset { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 9px; cursor: pointer;
